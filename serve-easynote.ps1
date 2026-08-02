@@ -51,20 +51,6 @@ if (Test-EasyNoteServer) {
   exit 0
 }
 
-$CreatedNew = $false
-$ServerMutex = [Threading.Mutex]::new($true, "Local\EasyNoteServer-$Port", [ref]$CreatedNew)
-if (-not $CreatedNew) {
-  if (Test-EasyNoteServer -Attempts 12) {
-    if (-not $NoBrowser) { Start-Process $Url }
-    Write-Host "EasyNote startup was already in progress. The browser has been opened." -ForegroundColor Green
-    $ServerMutex.Dispose()
-    exit 0
-  }
-  Write-Host "Another EasyNote launcher owns the startup lock, but the server did not become ready." -ForegroundColor Red
-  $ServerMutex.Dispose()
-  exit 1
-}
-
 $ServerSource = Join-Path $SourceRoot "EasyNoteStaticServer.cs"
 Add-Type -Path $ServerSource
 $Server = New-Object EasyNoteStaticServer($AppRoot, $Port)
@@ -74,11 +60,9 @@ try {
   if (Test-EasyNoteServer -Attempts 12) {
     if (-not $NoBrowser) { Start-Process $Url }
     Write-Host "EasyNote was started by another launcher. The browser has been opened." -ForegroundColor Green
-    $ServerMutex.ReleaseMutex(); $ServerMutex.Dispose()
     exit 0
   }
   Write-Host "Port $Port is occupied by another program. EasyNote keeps this fixed port to protect your browser database." -ForegroundColor Red
-  $ServerMutex.ReleaseMutex(); $ServerMutex.Dispose()
   exit 1
 }
 
@@ -93,6 +77,4 @@ try {
   $Server.Run()
 } finally {
   $Server.Stop()
-  $ServerMutex.ReleaseMutex()
-  $ServerMutex.Dispose()
 }
