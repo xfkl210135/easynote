@@ -1,5 +1,5 @@
-(function () {
-  "use strict";
+// @ts-nocheck -- compatibility module; typed boundaries live in services/data-repository.ts.
+"use strict";
 
   const DB_NAME = "easynote-db";
   const DB_VERSION = 7;
@@ -998,6 +998,4 @@
     }
   }
 
-  window.EasyNoteDataSafety = EasyNoteDataSafety;
-  window.EasyNoteSafetyUtils = { sha256, dataUrlToBlob, blobToDataUrl };
-})();
+export { EasyNoteDataSafety, sha256, dataUrlToBlob, blobToDataUrl };

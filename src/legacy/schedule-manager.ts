@@ -1,5 +1,5 @@
-(function () {
-  "use strict";
+// @ts-nocheck -- preserved behavior while this workspace is progressively componentized.
+"use strict";
 
   const COLORS = ["#4f7df3", "#22a06b", "#f59e0b", "#8b5cf6", "#e5484d", "#ec4899", "#0891b2", "#64748b"];
   const UI_KEY = "easynote-schedule-ui-v2";
@@ -232,5 +232,4 @@
     }
   }
 
-  window.EasyNoteScheduleManager=ScheduleManager;
-})();
+export { ScheduleManager };

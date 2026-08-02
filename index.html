@@ -227,7 +227,7 @@
               <div class="whiteboard-nodes" id="whiteboardNodes"></div>
             </div>
             <div class="whiteboard-selection-toolbar" id="whiteboardSelectionToolbar" hidden>
-              <button data-whiteboard-edit>编辑</button><button data-whiteboard-duplicate>复制</button><button data-whiteboard-color>换色</button>
+              <button data-whiteboard-edit>编辑</button><button data-whiteboard-connect hidden>连接</button><button data-whiteboard-duplicate>复制</button><button data-whiteboard-color>换色</button>
               <button data-whiteboard-front>置顶</button><button data-whiteboard-back>置底</button><button class="danger-text" data-whiteboard-remove>删除</button>
             </div>
             <div class="whiteboard-zoom-controls">
@@ -462,10 +462,7 @@
       <button id="migrationBannerExport">导出迁移备份</button><button id="migrationBannerDismiss" aria-label="暂时关闭">×</button>
     </div>
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
-    <script src="data-safety.js"></script>
-    <script src="task-manager.js"></script>
-    <script src="schedule-manager.js"></script>
-    <script src="whiteboard-manager.js"></script>
-    <script src="app-v2.js"></script>
+    <div id="vue-shell-root"></div>
+    <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

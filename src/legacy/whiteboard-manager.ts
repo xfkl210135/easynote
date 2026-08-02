@@ -1,5 +1,5 @@
-(function () {
-  "use strict";
+// @ts-nocheck -- preserved behavior while this workspace is progressively componentized.
+"use strict";
 
   const COLORS = ["#4f7df3", "#22a06b", "#f59e0b", "#8b5cf6", "#e5484d", "#64748b"];
   const NODE_TYPES = new Set(["text", "note", "task", "image", "link", "group"]);
@@ -38,6 +38,10 @@
       this.drag = null;
       this.pan = null;
       this.connection = null;
+      this.touchPointers = new Map();
+      this.pinch = null;
+      this.longPressTimer = null;
+      this.longPressOrigin = null;
       this.inlineEditingNodeId = "";
       this.replacingImageNodeId = "";
       this.ensureState();
@@ -231,6 +235,7 @@
       const visible = this.selected.size || this.selectedEdgeId; this.el.selection.hidden = !visible; if (!visible) return;
       const one = this.selected.size === 1 ? this.node([...this.selected][0]) : null, edit = this.el.selection.querySelector("[data-whiteboard-edit]");
       edit.hidden = !one || one.type === "image"; edit.textContent = one?.type === "text" ? "编辑文字" : ["note", "task"].includes(one?.type) ? "重新关联" : "编辑";
+      const connect = this.el.selection.querySelector("[data-whiteboard-connect]"); if (connect) connect.hidden = !one || one.type === "group" || !this.board.nodes.some((node) => node.id !== one.id && node.type !== "group");
       this.el.selection.querySelector("[data-whiteboard-duplicate]").hidden = !this.selected.size; this.el.selection.querySelectorAll("[data-whiteboard-front],[data-whiteboard-back]").forEach((button) => button.hidden = !this.selected.size);
       if (!this.selected.size) { this.el.selection.style.left = "50%"; this.el.selection.style.top = "14px"; return; }
       const nodes = [...this.selected].map((nodeId) => this.node(nodeId)).filter(Boolean), view = this.board.viewport;
@@ -275,6 +280,30 @@
     updateGroups() { const groups = this.board.nodes.filter((node) => node.type === "group").sort((a, b) => b.zIndex - a.zIndex); this.board.nodes.filter((node) => node.type !== "group").forEach((node) => { const cx = node.x + node.width / 2, cy = node.y + node.height / 2, group = groups.find((item) => cx >= item.x && cx <= item.x + item.width && cy >= item.y && cy <= item.y + item.height); node.groupId = group?.id || ""; }); }
 
     startConnection(event, handle) { const node = this.node(handle.closest("[data-whiteboard-node]").dataset.whiteboardNode); if (!node) return; this.connection = { sourceId: node.id, sourceSide: handle.dataset.connectSide, path: "" }; this.movePointer(event); event.stopPropagation(); event.preventDefault(); }
+    startLongPress(event) {
+      clearTimeout(this.longPressTimer); this.longPressOrigin = { x: event.clientX, y: event.clientY, target: event.target };
+      this.longPressTimer = setTimeout(() => {
+        const origin = this.longPressOrigin; if (!origin || this.touchPointers.size !== 1 || this.pinch) return;
+        this.pan = null; this.drag = null;
+        origin.target.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: origin.x, clientY: origin.y, button: 2 }));
+        this.longPressOrigin = null;
+      }, 550);
+    }
+    cancelLongPress() { clearTimeout(this.longPressTimer); this.longPressTimer = null; this.longPressOrigin = null; }
+    beginPinch() {
+      const points = [...this.touchPointers.values()]; if (points.length < 2) return;
+      this.cancelLongPress(); this.pan = null; this.drag = null;
+      const [left, right] = points, rect = this.el.canvas.getBoundingClientRect(), view = this.board.viewport;
+      const midX = (left.x + right.x) / 2 - rect.left, midY = (left.y + right.y) / 2 - rect.top;
+      this.pinch = { distance: Math.max(1, Math.hypot(right.x - left.x, right.y - left.y)), zoom: view.zoom, worldX: (midX - view.x) / view.zoom, worldY: (midY - view.y) / view.zoom };
+    }
+    movePinch(event) {
+      const points = [...this.touchPointers.values()]; if (!this.pinch || points.length < 2) return false;
+      const [left, right] = points, rect = this.el.canvas.getBoundingClientRect(), view = this.board.viewport;
+      const distance = Math.max(1, Math.hypot(right.x - left.x, right.y - left.y)), zoom = clamp(this.pinch.zoom * distance / this.pinch.distance, .25, 2.5);
+      const midX = (left.x + right.x) / 2 - rect.left, midY = (left.y + right.y) / 2 - rect.top;
+      view.zoom = zoom; view.x = midX - this.pinch.worldX * zoom; view.y = midY - this.pinch.worldY * zoom; this.applyViewport(); event.preventDefault(); return true;
+    }
     zoomAt(nextZoom, clientX, clientY) { const view = this.board.viewport, rect = this.el.canvas.getBoundingClientRect(), old = view.zoom, zoom = clamp(nextZoom, .25, 2.5), px = clientX - rect.left, py = clientY - rect.top, wx = (px - view.x) / old, wy = (py - view.y) / old; view.zoom = zoom; view.x = px - wx * zoom; view.y = py - wy * zoom; this.applyViewport(); this.save(); }
     fitContent() { if (!this.board.nodes.length) return this.resetViewport(); const rect = this.el.canvas.getBoundingClientRect(), minX = Math.min(...this.board.nodes.map((node) => node.x)), minY = Math.min(...this.board.nodes.map((node) => node.y)), maxX = Math.max(...this.board.nodes.map((node) => node.x + node.width)), maxY = Math.max(...this.board.nodes.map((node) => node.y + node.height)), zoom = clamp(Math.min((rect.width - 100) / (maxX - minX), (rect.height - 100) / (maxY - minY)), .25, 1.5); this.board.viewport = { zoom, x: (rect.width - (maxX - minX) * zoom) / 2 - minX * zoom, y: (rect.height - (maxY - minY) * zoom) / 2 - minY * zoom }; this.applyViewport(); this.save(); }
     resetViewport() { this.board.viewport = { x: 0, y: 0, zoom: 1 }; this.applyViewport(); this.save(); }
@@ -358,17 +387,24 @@
     }
 
     openDialog(mode, node = null, point = null) {
-      this.dialogMode = mode; this.editingNodeId = node?.id || ""; this.pendingPoint = point; this.dialogError.hidden = true; this.dialogTitle.textContent = `${node ? "编辑" : "添加"}${({ text: "文本", note: "笔记", task: "任务", link: "网页链接", group: "分组" })[mode] || "卡片"}`;
+      this.dialogMode = mode; this.editingNodeId = node?.id || ""; this.pendingPoint = point; this.dialogError.hidden = true; this.dialogTitle.textContent = mode === "connect" ? "连接卡片" : `${node ? "编辑" : "添加"}${({ text: "文本", note: "笔记", task: "任务", link: "网页链接", group: "分组" })[mode] || "卡片"}`;
       if (mode === "text") this.dialogBody.innerHTML = `<label><span>标题</span><input name="title" maxlength="120" value="${attr(node?.title || "")}" placeholder="可选标题"></label><label><span>内容</span><textarea name="text" rows="7" required>${esc(node?.text || "")}</textarea></label>`;
       if (mode === "group") this.dialogBody.innerHTML = `<label><span>分组名称</span><input name="title" maxlength="120" required value="${attr(node?.title || "新分组")}"></label>`;
       if (mode === "link") this.dialogBody.innerHTML = `<label><span>标题</span><input name="title" maxlength="120" value="${attr(node?.title || "")}" placeholder="可选，默认使用网址"></label><label><span>网址</span><input name="url" type="url" required value="${attr(node?.url || "https://")}"></label>`;
       if (mode === "note") this.dialogBody.innerHTML = `<label><span>选择笔记</span><select name="refId" required><option value="">请选择</option>${this.notes().filter((note) => !note.deletedAt).map((note) => `<option value="${note.id}" ${node?.noteId === note.id ? "selected" : ""}>${esc(note.title || "无标题笔记")}</option>`).join("")}</select></label>`;
       if (mode === "task") this.dialogBody.innerHTML = `<label><span>选择任务</span><select name="refId" required><option value="">请选择</option>${this.tasks().map((task) => `<option value="${task.id}" ${node?.taskId === task.id ? "selected" : ""}>${esc(this.taskTitle(task))}</option>`).join("")}</select></label>`;
+      if (mode === "connect") this.dialogBody.innerHTML = `<label><span>连接到</span><select name="targetId" required><option value="">请选择目标卡片</option>${this.board.nodes.filter((item) => item.id !== node?.id && item.type !== "group").map((item) => `<option value="${attr(item.id)}">${esc(this.nodeLabel(item))}</option>`).join("")}</select></label>`;
       this.dialogBackdrop.hidden = false; requestAnimationFrame(() => this.dialog.querySelector("input,textarea,select")?.focus());
     }
 
     submitDialog() {
       const data = new FormData(this.dialog), node = this.node(this.editingNodeId), mode = this.dialogMode;
+      if (mode === "connect") {
+        const target = this.node(String(data.get("targetId") || ""));
+        if (!node || !target || node.id === target.id || node.type === "group" || target.type === "group") return;
+        if (!this.board.edges.some((edge) => edge.sourceId === node.id && edge.targetId === target.id)) { this.pushHistory(); this.board.edges.push({ id: id("edge"), sourceId: node.id, targetId: target.id, sourceSide: this.autoSide(node, target), targetSide: this.autoSide(target, node), color: node.color || COLORS[0] }); this.save(true, "manual"); this.renderCanvas(); }
+        this.closeDialog(); return;
+      }
       if (mode === "link" && !/^https?:\/\//i.test(String(data.get("url") || ""))) { this.dialogError.textContent = "网址必须以 http:// 或 https:// 开头"; this.dialogError.hidden = false; return; }
       if (node) { this.pushHistory(); node.title = String(data.get("title") || "").trim(); node.text = String(data.get("text") || "").trim(); if (mode === "link") node.url = String(data.get("url") || "").trim(); if (mode === "note") node.noteId = String(data.get("refId") || ""); if (mode === "task") node.taskId = String(data.get("refId") || ""); this.save(); this.renderCanvas(); }
       else if (mode === "text") this.createNode("text", { title: String(data.get("title") || "").trim(), text: String(data.get("text") || "").trim() });
@@ -380,6 +416,7 @@
     }
 
     editSelected() { if (this.selected.size !== 1) return; const node = this.node([...this.selected][0]); if (!node) return; if (node.type === "text") return this.focusInlineText(node.id, node.title ? "text" : "title"); if (["note", "task", "link", "group"].includes(node.type)) this.openDialog(node.type, node); }
+    connectSelected() { if (this.selected.size !== 1) return; const node = this.node([...this.selected][0]); if (node && node.type !== "group") this.openDialog("connect", node); }
     closeDialog() { if (this.dialogBackdrop) this.dialogBackdrop.hidden = true; this.dialogMode = ""; this.editingNodeId = ""; this.pendingPoint = null; }
 
     async addImages(files, point = null) { const images = [...files].filter((file) => file.type.startsWith("image/")); if (!images.length) return this.options.toast("白板目前只支持图片文件"); for (const file of images) { if (file.size > 12 * 1024 * 1024) { this.options.toast(`图片“${file.name}”超过 12MB`); continue; } const attachment = await this.options.safety.putAttachment(file, { name: file.name, type: file.type }); this.createNode("image", { attachmentId: attachment.id, title: file.name, point: point || this.nextPoint() }); point = point ? { x: point.x + 30, y: point.y + 30 } : null; } await this.save(true, "manual"); }
@@ -399,15 +436,17 @@
       this.el.zoomIn.addEventListener("click", () => { const rect = this.el.canvas.getBoundingClientRect(); this.zoomAt(this.board.viewport.zoom * 1.2, rect.left + rect.width / 2, rect.top + rect.height / 2); });
       this.el.zoomOut.addEventListener("click", () => { const rect = this.el.canvas.getBoundingClientRect(); this.zoomAt(this.board.viewport.zoom / 1.2, rect.left + rect.width / 2, rect.top + rect.height / 2); }); this.el.fit.addEventListener("click", () => this.fitContent()); this.el.reset.addEventListener("click", () => this.resetViewport());
       this.el.canvas.addEventListener("wheel", (event) => { if (event.target.closest(".whiteboard-scrollable")) return; event.preventDefault(); this.zoomAt(this.board.viewport.zoom * (event.deltaY > 0 ? .9 : 1.1), event.clientX, event.clientY); }, { passive: false });
-      this.el.canvas.addEventListener("pointerdown", (event) => { this.closeContextMenu(); const handle = event.target.closest("[data-connect-side]"); if (handle) return this.startConnection(event, handle); const resize = event.target.closest("[data-whiteboard-resize]"); if (resize) return this.startResize(event, resize); const node = event.target.closest("[data-whiteboard-node]"); if (node) return this.startNodeDrag(event, node); const edge = event.target.closest("[data-whiteboard-edge]"); if (edge) { this.selected.clear(); this.selectedEdgeId = edge.dataset.whiteboardEdge; this.renderCanvas(); return; } this.startPan(event); });
-      window.addEventListener("pointermove", (event) => this.movePointer(event)); window.addEventListener("pointerup", (event) => this.endPointer(event));
+      this.el.canvas.addEventListener("pointerdown", (event) => { this.closeContextMenu(); if (event.pointerType === "touch") { this.touchPointers.set(event.pointerId, { x: event.clientX, y: event.clientY }); this.el.canvas.setPointerCapture?.(event.pointerId); if (this.touchPointers.size === 1) this.startLongPress(event); if (this.touchPointers.size === 2) { this.beginPinch(); event.preventDefault(); return; } } const handle = event.target.closest("[data-connect-side]"); if (handle) return this.startConnection(event, handle); const resize = event.target.closest("[data-whiteboard-resize]"); if (resize) return this.startResize(event, resize); const node = event.target.closest("[data-whiteboard-node]"); if (node) return this.startNodeDrag(event, node); const edge = event.target.closest("[data-whiteboard-edge]"); if (edge) { this.selected.clear(); this.selectedEdgeId = edge.dataset.whiteboardEdge; this.renderCanvas(); return; } this.startPan(event); });
+      window.addEventListener("pointermove", (event) => { if (event.pointerType === "touch" && this.touchPointers.has(event.pointerId)) { this.touchPointers.set(event.pointerId, { x: event.clientX, y: event.clientY }); if (this.longPressOrigin && Math.hypot(event.clientX - this.longPressOrigin.x, event.clientY - this.longPressOrigin.y) > 8) this.cancelLongPress(); if (this.movePinch(event)) return; } this.movePointer(event); });
+      window.addEventListener("pointerup", (event) => { if (event.pointerType === "touch") { this.touchPointers.delete(event.pointerId); this.cancelLongPress(); if (this.pinch) { if (this.touchPointers.size < 2) { this.pinch = null; this.save(); } return; } } this.endPointer(event); });
+      window.addEventListener("pointercancel", (event) => { if (event.pointerType === "touch") { this.touchPointers.delete(event.pointerId); this.cancelLongPress(); this.pinch = null; this.pan = null; this.drag = null; } });
       this.el.canvas.addEventListener("dblclick", (event) => { const element = event.target.closest("[data-whiteboard-node]"), node = element && this.node(element.dataset.whiteboardNode); if (node) { this.selected = new Set([node.id]); if (node.type === "text") return this.focusInlineText(node.id, event.target.dataset.whiteboardInline || "text"); if (["note", "task", "link"].includes(node.type)) return this.openNodeSource(node); return this.editSelected(); } if (event.target === this.el.canvas) this.createNode("text", { point: this.screenPoint(event) }); });
       this.el.nodes.addEventListener("click", (event) => { const note = event.target.closest("[data-whiteboard-open-note]"); if (note) return this.options.openNote(note.dataset.whiteboardOpenNote); const task = event.target.closest("[data-whiteboard-open-task]"); if (task) return this.options.openTask(task.dataset.whiteboardOpenTask); const previewLink = event.target.closest("[data-whiteboard-preview-link]"), link = event.target.closest("[data-whiteboard-open-link]"), url = previewLink?.dataset.whiteboardPreviewLink || link?.dataset.whiteboardOpenLink; if (url && /^https?:\/\//i.test(url)) return window.open(url, "_blank", "noopener,noreferrer"); });
       this.el.nodes.addEventListener("focusin", (event) => { const editor = event.target.closest("[data-whiteboard-inline]"); if (editor) this.beginInlineEdit(editor); });
       this.el.nodes.addEventListener("input", (event) => { const editor = event.target.closest("[data-whiteboard-inline]"); if (editor) this.updateInlineEdit(editor); });
       this.el.nodes.addEventListener("focusout", (event) => { const editor = event.target.closest("[data-whiteboard-inline]"); if (editor) this.finishInlineEdit(editor); });
       this.el.nodes.addEventListener("keydown", (event) => { const editor = event.target.closest("[data-whiteboard-inline]"); if (!editor) return; if (event.key === "Escape") { event.preventDefault(); editor.blur(); } else if (editor.dataset.whiteboardInline === "title" && event.key === "Enter") { event.preventDefault(); editor.closest("[data-whiteboard-node]").querySelector('[data-whiteboard-inline="text"]').focus(); } else if (editor.dataset.whiteboardInline === "text" && (event.ctrlKey || event.metaKey) && event.key === "Enter") { event.preventDefault(); editor.blur(); } });
-      this.el.selection.addEventListener("click", (event) => { if (event.target.closest("[data-whiteboard-edit]")) this.editSelected(); else if (event.target.closest("[data-whiteboard-duplicate]")) this.duplicateSelection(); else if (event.target.closest("[data-whiteboard-color]")) this.cycleColor(); else if (event.target.closest("[data-whiteboard-front]")) this.changeLayer(1); else if (event.target.closest("[data-whiteboard-back]")) this.changeLayer(-1); else if (event.target.closest("[data-whiteboard-remove]")) this.deleteSelection(); });
+      this.el.selection.addEventListener("click", (event) => { if (event.target.closest("[data-whiteboard-edit]")) this.editSelected(); else if (event.target.closest("[data-whiteboard-connect]")) this.connectSelected(); else if (event.target.closest("[data-whiteboard-duplicate]")) this.duplicateSelection(); else if (event.target.closest("[data-whiteboard-color]")) this.cycleColor(); else if (event.target.closest("[data-whiteboard-front]")) this.changeLayer(1); else if (event.target.closest("[data-whiteboard-back]")) this.changeLayer(-1); else if (event.target.closest("[data-whiteboard-remove]")) this.deleteSelection(); });
       document.querySelector("#whiteboardAddToolbar").addEventListener("click", (event) => { const action = event.target.closest("[data-whiteboard-add]"); if (action) this.handleAddAction(action.dataset.whiteboardAdd); });
       this.el.canvas.addEventListener("contextmenu", (event) => this.showContextMenu(event));
       this.contextMenu.addEventListener("click", (event) => { const button = event.target.closest("[data-whiteboard-context]"); if (button && !button.disabled) this.runContextAction(button.dataset.whiteboardContext, button); });
@@ -420,5 +459,4 @@
     }
   }
 
-  window.EasyNoteWhiteboardManager = WhiteboardManager;
-})();
+export { WhiteboardManager };

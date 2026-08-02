@@ -1,5 +1,10 @@
-(function () {
-  "use strict";
+// @ts-nocheck -- compatibility controller; new shell, routing, stores and data contracts are strict TypeScript.
+import { EasyNoteDataSafety } from "./data-safety";
+import { TaskManager } from "./task-manager";
+import { ScheduleManager } from "./schedule-manager";
+import { WhiteboardManager } from "./whiteboard-manager";
+
+"use strict";
 
   const LEGACY_STORAGE_KEY = "easynote-data-v1";
   const THEME_KEY = "easynote-theme";
@@ -153,7 +158,7 @@
 
   async function loadData() {
     try {
-      safety = new window.EasyNoteDataSafety({ onStatus: setSaveStatus });
+      safety = new EasyNoteDataSafety({ onStatus: setSaveStatus });
       const stored = await safety.load();
       storageMode = "indexeddb-verified";
       if (stored) return normalizeData(stored);
@@ -183,6 +188,26 @@
     if (!safety) return Promise.resolve(false);
     return safety.queueSave(state, immediate, reason);
   }
+
+  async function ensureVueMigrationRecovery() {
+    if (!document.querySelector("#vue-shell-root") || !safety) return;
+    const marker = await safety.get("meta", "vueMigrationV1");
+    if (marker?.state === "verified") return;
+    if (!safety.wasEmpty) await safety.recordRecovery("vue-migration", "迁移到 Vue 前的完整数据", structuredClone(state));
+    await safety.put("meta", { key: "vueMigrationV1", state: "verified", migratedAt: now(), dataVersion: state.version || 8 });
+  }
+
+  window.addEventListener("easynote:flush-request", async () => {
+    let ok = true;
+    try {
+      flushActiveWorkspace("pwa-update");
+      ok = safety ? await safety.flush() : true;
+    } catch (error) {
+      ok = false;
+      console.error("EasyNote shell flush failed", error);
+    }
+    window.dispatchEvent(new CustomEvent("easynote:flush-complete", { detail: { ok } }));
+  });
 
   function loadLayout() {
     try { return { ...DEFAULT_LAYOUT, ...JSON.parse(localStorage.getItem(LAYOUT_KEY) || "{}") }; }
@@ -1114,13 +1139,21 @@
   }
 
   function downloadFile(name, content, type) { const blob = new Blob([content], { type }); const url = URL.createObjectURL(blob); const anchor = document.createElement("a"); anchor.href = url; anchor.download = name; anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); }
+  async function shareOrDownloadFile(name, content, type) {
+    const file = new File([content], name, { type });
+    if (matchMedia("(max-width: 620px)").matches && navigator.share && navigator.canShare?.({ files: [file] })) {
+      try { await navigator.share({ title: "EasyNote 完整备份", files: [file] }); return "shared"; }
+      catch (error) { if (error?.name === "AbortError") return "cancelled"; }
+    }
+    downloadFile(name, content, type); return "downloaded";
+  }
   async function exportData() {
     try {
       await flushActiveWorkspace("manual");
       const date = new Date().toISOString().slice(0, 10);
       const portable = await safety.exportPortable(state);
-      downloadFile(`easynote-backup-${date}.json`, JSON.stringify(portable, null, 2), "application/json;charset=utf-8");
-      showToast("便携式完整备份已导出并包含全部附件");
+      const result = await shareOrDownloadFile(`easynote-backup-${date}.json`, JSON.stringify(portable, null, 2), "application/json;charset=utf-8");
+      if (result !== "cancelled") showToast(result === "shared" ? "便携式完整备份已发送" : "便携式完整备份已导出并包含全部附件");
     } catch (error) { console.error(error); showToast(`备份导出失败：${error.message || error}`); }
   }
   function exportNoteMarkdown(id = activeNoteId) {
@@ -1790,9 +1823,10 @@
     const preferredTheme = localStorage.getItem(THEME_KEY) || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
     document.documentElement.dataset.theme = preferredTheme;
     state = await loadData();
+    await ensureVueMigrationRecovery();
     if (!Array.isArray(layout.expandedFolders)) layout.expandedFolders = getChildFolders(null).map((folder) => folder.id);
     activeNoteId = state.notes.find((note) => !note.deletedAt)?.id || null;
-    taskManager = new window.EasyNoteTaskManager({
+    taskManager = new TaskManager({
       state, safety, persist, toast: showToast,
       notes: () => state.notes,
       onEnter: () => { flushActiveWorkspace("switch"); scheduleManager?.leave(); whiteboardManager?.leave(); },
@@ -1800,14 +1834,14 @@
       openNote: (id) => { taskManager.leave(); searchTerm = ""; els.searchInput.value = ""; const note = getNote(id); if (note?.categoryId) activeView = `category:${note.categoryId}`; selectNote(id); renderSidebar(); },
       openLink: (url) => { if (!url) return; taskManager.leave(); openLinkInEditor(url, url); }
     });
-    scheduleManager = new window.EasyNoteScheduleManager({
+    scheduleManager = new ScheduleManager({
       state, safety, persist, toast: showToast, openContextMenu,
       tasks: () => state.tasks,
       fields: () => state.taskFields,
       openSchedule: (date) => { setActiveView("schedule"); scheduleManager?.selectDate(date); renderSidebar(); },
       openTask: (id) => { setActiveView("tasks"); taskManager?.openTask(id); renderSidebar(); }
     });
-    whiteboardManager = new window.EasyNoteWhiteboardManager({
+    whiteboardManager = new WhiteboardManager({
       state, safety, persist, toast: showToast,
       notes: () => state.notes,
       tasks: () => state.tasks,
@@ -1829,11 +1863,14 @@
     safety.startAutomaticBackup();
     updateSafetyCenter().catch(console.error);
     if (location.protocol === "file:" && !sessionStorage.getItem("easynote-migration-dismissed")) els.migrationBanner.hidden = false;
-    if (location.protocol === "http:" && safety.wasEmpty) { setTimeout(openSafetyCenter, 350); showToast("首次安全启动：请导入旧备份并选择自动备份目录"); }
+    if (location.protocol === "http:" && safety.wasEmpty) {
+      const desktopDirectoryBackup = "showDirectoryPicker" in window && matchMedia("(min-width: 621px)").matches;
+      if (desktopDirectoryBackup) { setTimeout(openSafetyCenter, 350); showToast("首次安全启动：请导入旧备份并选择自动备份目录"); }
+      else showToast("数据已安全保存在当前浏览器，可从侧栏导入或导出完整 JSON");
+    }
     setInterval(() => { if (!document.hidden) updateSafetyCenter().catch(console.error); }, 5 * 60 * 1000);
     const runFullCheck = () => safety.integrityCheck({ full: true }).catch((error) => console.error("后台完整性检查失败", error));
     if ("requestIdleCallback" in window) requestIdleCallback(runFullCheck, { timeout: 8000 }); else setTimeout(runFullCheck, 2500);
   }
 
-  init().catch((error) => { console.error(error); document.body.innerHTML = `<div style="padding:40px;font-family:sans-serif"><h2>EasyNote 无法启动</h2><p>${escapeHtml(error.message)}</p></div>`; });
-})();
+init().catch((error) => { console.error(error); document.body.innerHTML = `<div style="padding:40px;font-family:sans-serif"><h2>EasyNote 无法启动</h2><p>${escapeHtml(error.message)}</p></div>`; });

@@ -19,6 +19,8 @@ public sealed class EasyNoteStaticServer
         { ".js", "text/javascript; charset=utf-8" },
         { ".css", "text/css; charset=utf-8" },
         { ".json", "application/json; charset=utf-8" },
+        { ".map", "application/json; charset=utf-8" },
+        { ".webmanifest", "application/manifest+json; charset=utf-8" },
         { ".svg", "image/svg+xml" },
         { ".png", "image/png" },
         { ".jpg", "image/jpeg" },
@@ -94,6 +96,7 @@ public sealed class EasyNoteStaticServer
 
         string status = "200 OK";
         string contentType = "application/octet-stream";
+        string cacheControl = "no-cache";
         byte[] body;
         string candidate = Path.GetFullPath(Path.Combine(root, relative));
 
@@ -115,12 +118,18 @@ public sealed class EasyNoteStaticServer
             string extension = Path.GetExtension(candidate);
             string knownType;
             if (MimeTypes.TryGetValue(extension, out knownType)) contentType = knownType;
+            if (relative.StartsWith("assets" + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
+                relative.StartsWith("icons" + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
+                relative.StartsWith("workbox-", StringComparison.OrdinalIgnoreCase))
+            {
+                cacheControl = "public, max-age=31536000, immutable";
+            }
         }
 
         string headers = "HTTP/1.1 " + status + "\r\n" +
             "Content-Type: " + contentType + "\r\n" +
             "Content-Length: " + body.Length + "\r\n" +
-            "Cache-Control: no-cache\r\n" +
+            "Cache-Control: " + cacheControl + "\r\n" +
             "X-Content-Type-Options: nosniff\r\n" +
             "Connection: close\r\n\r\n";
         byte[] headerBytes = Encoding.ASCII.GetBytes(headers);

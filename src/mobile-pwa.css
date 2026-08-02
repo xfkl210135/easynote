@@ -1,0 +1,142 @@
+:root {
+  --mobile-nav-height: 64px;
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+}
+
+.mobile-bottom-nav { display: none; }
+
+.pwa-status {
+  position: fixed;
+  right: max(14px, var(--safe-right));
+  bottom: max(14px, var(--safe-bottom));
+  z-index: 900;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: min(430px, calc(100vw - 28px));
+  padding: 11px 13px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  color: var(--text);
+  background: var(--surface);
+  box-shadow: 0 18px 50px rgb(15 23 42 / 24%);
+}
+
+.pwa-status button,
+.pwa-help button {
+  min-height: 36px;
+  border: 0;
+  border-radius: 8px;
+  padding: 0 12px;
+  color: #fff;
+  background: var(--primary);
+  white-space: nowrap;
+}
+
+.pwa-offline { color: #8a5b00; background: #fff8df; }
+[data-theme="dark"] .pwa-offline { color: #ffd886; background: #3a301a; }
+
+.pwa-help-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 950;
+  display: grid;
+  align-items: end;
+  padding: 18px max(14px, var(--safe-right)) max(18px, var(--safe-bottom)) max(14px, var(--safe-left));
+  background: rgb(15 23 42 / 48%);
+}
+
+.pwa-help {
+  width: min(520px, 100%);
+  margin: 0 auto;
+  padding: 22px;
+  border-radius: 18px;
+  color: var(--text);
+  background: var(--surface);
+  box-shadow: 0 24px 80px rgb(15 23 42 / 30%);
+}
+
+.pwa-help h2 { margin: 0 0 8px; font-size: 20px; }
+.pwa-help p { margin: 0 0 18px; color: var(--text-soft); line-height: 1.65; }
+.pwa-help button { width: 100%; min-height: 44px; }
+
+.directory-backup-unsupported #chooseBackupDirectoryButton,
+.directory-backup-unsupported #backupNowButton,
+.directory-backup-unsupported #verifyBackupButton { display: none; }
+
+@media (max-width: 620px) {
+  html, body { height: 100dvh; }
+  body { padding-top: var(--safe-top); padding-left: var(--safe-left); padding-right: var(--safe-right); }
+  .app-shell { height: calc(100dvh - var(--safe-top) - var(--mobile-nav-height) - var(--safe-bottom)); }
+  .topbar { height: 58px; }
+  .workspace { height: calc(100% - 58px); }
+
+  button, [role="button"], select { min-height: 44px; }
+  input, textarea, select { font-size: max(16px, 1em); }
+  .icon-button { width: 44px; height: 44px; }
+  .format-toolbar button { min-width: 42px; min-height: 42px; }
+  .context-item, .whiteboard-context-menu > button { min-height: 44px; }
+
+  .mobile-bottom-nav {
+    position: fixed;
+    z-index: 880;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: calc(var(--mobile-nav-height) + var(--safe-bottom));
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-around;
+    padding: 5px max(6px, var(--safe-right)) var(--safe-bottom) max(6px, var(--safe-left));
+    border-top: 1px solid var(--border);
+    background: color-mix(in srgb, var(--surface) 94%, transparent);
+    box-shadow: 0 -8px 24px rgb(15 23 42 / 8%);
+    backdrop-filter: blur(16px);
+  }
+
+  .mobile-bottom-nav button {
+    min-width: 58px;
+    min-height: 54px;
+    display: grid;
+    grid-template-rows: 24px 17px;
+    place-items: center;
+    border: 0;
+    border-radius: 10px;
+    padding: 4px 6px;
+    color: var(--muted);
+    background: transparent;
+  }
+
+  .mobile-bottom-nav button.active { color: var(--primary); background: var(--primary-soft); }
+  .mobile-bottom-nav span { font-size: 20px; line-height: 1; }
+  .mobile-bottom-nav b { font-size: 11px; font-weight: 650; }
+
+  .pwa-status {
+    right: max(10px, var(--safe-right));
+    bottom: calc(var(--mobile-nav-height) + var(--safe-bottom) + 10px);
+    left: max(10px, var(--safe-left));
+    justify-content: space-between;
+    max-width: none;
+  }
+
+  .task-detail-drawer,
+  .task-modal,
+  .schedule-editor,
+  .whiteboard-dialog,
+  .safety-center { max-height: 100dvh; }
+
+  .task-table-wrap { overflow: auto; -webkit-overflow-scrolling: touch; }
+  .task-header-actions #taskAddButton { order: -1; flex: 0 0 auto; }
+  .task-board, .format-toolbar, .whiteboard-header, .whiteboard-add-toolbar { scrollbar-width: none; }
+  .task-board::-webkit-scrollbar,
+  .format-toolbar::-webkit-scrollbar,
+  .whiteboard-header::-webkit-scrollbar,
+  .whiteboard-add-toolbar::-webkit-scrollbar { display: none; }
+}
+
+@media (display-mode: standalone) {
+  .migration-banner { display: none !important; }
+}

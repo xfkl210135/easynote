@@ -1,5 +1,5 @@
-(function () {
-  "use strict";
+// @ts-nocheck -- preserved behavior while this workspace is progressively componentized.
+"use strict";
 
   const TYPE_LABELS = {
     text: "文本", singleSelect: "单选", multiSelect: "多选", number: "数字", date: "日期",
@@ -894,5 +894,4 @@
     commitDrawerInput(input) { const field = this.field(input.dataset.detailInput); if (!field) return; let value = input.value; if (field.type === "number") value = input.value === "" ? null : Number(input.value); if (field.type === "checkbox") value = input.checked; if (field.type === "multiSelect") value = [...input.selectedOptions].map((option) => option.value); this.updateValue(this.openTaskId, field.id, value); if (field.systemRole === "title") document.querySelector("#taskDetailTitle").textContent = value || "未命名任务"; }
   }
 
-  window.EasyNoteTaskManager = TaskManager;
-})();
+export { TaskManager };

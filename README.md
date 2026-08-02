@@ -1,5 +1,38 @@
 # EasyNote
 
+EasyNote 现已使用 Vue 3、TypeScript 和 Vite 构建。桌面端继续使用原有的本地优先 IndexedDB，手机端可直接通过现代浏览器访问；PWA 安装是可选能力，不需要安装 Android 或 iOS 原生应用。
+
+## 开发与构建
+
+需要 Node.js 20 或更高版本：
+
+```powershell
+npm install
+npm run dev
+```
+
+开发服务器默认监听 `http://localhost:4173/`。生产构建、类型检查和测试：
+
+```powershell
+npm run build
+npm test
+npm run test:e2e
+```
+
+`npm run build` 会把可部署文件写入 `dist/`。双击 `start-easynote.bat` 仍会使用固定的 `http://localhost:4173/`，从而继续读取该来源下的现有 IndexedDB；如果生产构建不存在，启动脚本会先自动构建。
+
+## 手机网页与部署
+
+把 `dist/` 中的全部文件部署到支持 HTTPS 的静态网站即可。`index.html` 和 Service Worker 应使用短缓存或不缓存，`assets/` 与 `icons/` 可以长期缓存。首次在线打开成功后，页面可以离线重新启动。
+
+- Android Chrome 和 iPhone Safari 都可以直接使用网页。
+- 页面不提供原生应用安装入口；如用户自行通过浏览器“添加到主屏幕”，仍可作为普通 PWA 使用。
+- 每个浏览器的数据仍独立保存在本机；本阶段不包含账号或多设备自动同步。
+- 手机浏览器不支持目录选择时，数据安全中心会保留便携 JSON 导入导出，并隐藏自动目录备份按钮。
+- 从其他域名或其他设备首次使用时，请通过便携 JSON 导入现有数据。
+
+生产部署必须保持同一域名和 HTTPS。更换域名会得到新的浏览器存储空间，旧数据不会自动迁移。
+
 一个本地优先的个人笔记网页，无需安装依赖或启动后端。
 
 ## 使用方式
