@@ -1,0 +1,471 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <title>EasyNote · 我的笔记</title>
+    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="schedule-manager.css" />
+    <link rel="stylesheet" href="whiteboard-manager.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar" data-context="topbar">
+        <button class="icon-button mobile-only" id="sidebarToggle" aria-label="打开侧边栏" title="菜单">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16" /></svg>
+        </button>
+
+        <label class="search-box" for="searchInput">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="m20 20-3.5-3.5" /></svg>
+          <input id="searchInput" type="search" placeholder="搜索标题、正文或标签…" autocomplete="off" />
+          <kbd>Ctrl K</kbd>
+        </label>
+
+        <div class="topbar-actions">
+          <span class="save-indicator" id="saveIndicator"><span></span> 已保存</span>
+          <div class="panel-switcher" id="panelSwitcher" aria-label="切换页面区域">
+            <button class="active" data-panel-switch="sidebar" aria-pressed="true" title="显示或隐藏侧栏">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></svg><span>侧栏</span>
+            </button>
+            <button class="active" data-panel-switch="list" aria-pressed="true" title="显示或隐藏笔记列表">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 4v16"/></svg><span>列表</span>
+            </button>
+            <button class="active" data-panel-switch="editor" aria-pressed="true" title="显示或隐藏正文">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9h10M7 13h10M7 17h7"/></svg><span>正文</span>
+            </button>
+          </div>
+          <button class="icon-button layout-button" id="layoutButton" aria-label="调整页面布局" title="页面布局">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M9 4v16M15 4v16" /></svg>
+          </button>
+          <button class="icon-button" id="themeToggle" aria-label="切换深色模式" title="切换主题">
+            <svg class="sun-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.66 6.34l1.41-1.41" /></svg>
+          </button>
+          <button class="primary-button" id="newNoteTop"><span>＋</span> 新建笔记</button>
+          <button class="focus-exit" id="focusExit" hidden>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5" /></svg>
+            退出专注
+          </button>
+        </div>
+        <div class="layout-popover" id="layoutPopover" hidden>
+          <strong>页面布局</strong>
+          <button data-layout-panel="sidebar"><span>显示侧边栏</span><i>✓</i></button>
+          <button data-layout-panel="list"><span>显示笔记列表</span><i>✓</i></button>
+          <button data-layout-panel="editor"><span>显示正文</span><i>✓</i></button>
+          <hr />
+          <button data-layout-action="focus"><span>进入专注模式</span><kbd>Ctrl Shift F</kbd></button>
+          <button data-layout-action="reset"><span>恢复默认布局</span></button>
+        </div>
+      </header>
+
+      <main class="workspace" id="workspace">
+        <aside class="sidebar" id="sidebar" data-context="sidebar">
+          <div class="brand">
+            <div class="brand-mark">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h8l4 4v14H6z" /><path d="M14 3v5h5M9 12h6M9 16h6" /></svg>
+            </div>
+            <div><strong>EasyNote</strong><span>我的灵感空间</span></div>
+          </div>
+
+          <nav class="nav-list" aria-label="笔记导航">
+            <button class="nav-item active" data-view="all" data-context="smart-view">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h9l3 3v15H6z" /><path d="M9 11h6M9 15h6" /></svg>
+              <span>全部笔记</span><em id="allCount">0</em>
+            </button>
+            <button class="nav-item" data-view="favorites" data-context="smart-view">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-2.9-5.6 2.9 1.1-6.2L3 9.6l6.2-.9z" /></svg>
+              <span>我的收藏</span><em id="favoriteCount">0</em>
+            </button>
+            <button class="nav-item" data-view="trash" data-context="smart-view">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M7 7l1 14h8l1-14M10 11v6M14 11v6" /></svg>
+              <span>回收站</span><em id="trashCount">0</em>
+            </button>
+            <button class="nav-item task-nav-item" id="taskNavButton" data-view="tasks" data-context="task-entry">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 1.5 1.5L11 8M14 9h3M7 15l1.5 1.5L11 14M14 15h3"/></svg>
+              <span>任务管理</span><em id="taskCount">0</em>
+            </button>
+            <button class="nav-item schedule-nav-item" id="scheduleNavButton" data-view="schedule" data-context="schedule-entry">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M7 3v4M17 3v4M3 10h18M7 14h3M14 14h3M7 18h3"/></svg>
+              <span>日程</span><em id="scheduleCount">0</em>
+            </button>
+            <button class="nav-item whiteboard-nav-item" id="whiteboardNavButton" data-view="whiteboard" data-context="whiteboard-entry">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9h4v4H7zM15 7h3v3h-3zM14 15h4v2h-4zM11 11l4-2M10 13l5 3"/></svg>
+              <span>白板</span><em id="whiteboardCount">0</em>
+            </button>
+          </nav>
+
+          <div class="section-heading"><span>文件夹</span><div class="section-heading-actions"><button id="uploadFileButton" title="上传本地文件到当前文件夹" aria-label="上传本地文件">↑</button><button id="addCategory" title="新建文件夹" aria-label="新建文件夹">＋</button></div></div>
+          <nav class="category-list folder-tree" id="categoryList" aria-label="笔记文件夹" data-context="category-space"></nav>
+
+          <div class="sidebar-footer">
+            <button class="utility-button safety-button" id="safetyCenterButton">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4.5 6v5.5c0 4.6 3.1 7.8 7.5 9.5 4.4-1.7 7.5-4.9 7.5-9.5V6z"/><path d="m9 12 2 2 4-5"/></svg>数据安全
+            </button>
+            <button class="utility-button" id="importButton">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M8 11l4 4 4-4M5 19h14" /></svg>导入数据
+            </button>
+            <button class="utility-button" id="exportButton">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4M8 8l4-4 4 4M5 20h14" /></svg>备份数据
+            </button>
+            <input id="importFile" type="file" accept="application/json,text/markdown,.json,.md,.markdown" hidden />
+            <p id="storageSummary">正在检查数据安全状态…</p>
+          </div>
+        </aside>
+
+        <div class="panel-resizer" id="sidebarResizer" data-resizer="sidebar" role="separator" aria-label="调整侧边栏宽度" tabindex="0">
+          <button data-collapse-panel="sidebar" aria-label="收起侧边栏">‹</button>
+        </div>
+
+        <section class="task-workspace" id="taskWorkspace" hidden aria-label="任务管理工作台">
+          <header class="task-header">
+            <div class="task-heading"><span>个人任务</span><h1>任务管理</h1></div>
+            <div class="task-view-tabs" role="tablist">
+              <button class="active" data-task-view="table" role="tab">任务管理表</button>
+              <button data-task-view="board" role="tab">任务看板</button>
+            </div>
+            <div class="task-header-actions">
+              <button class="text-button" id="taskFilterButton">筛选</button>
+              <button class="text-button" id="taskSortButton">排序</button>
+              <button class="text-button" id="taskCardSettingsButton" hidden>自定义卡片</button>
+              <button class="text-button" id="taskFieldsButton">自定义字段</button>
+              <button class="primary-button" id="taskAddButton">＋ 新建任务</button>
+            </div>
+          </header>
+          <div class="task-subbar">
+            <label>分组 <select id="taskGroupSelect"></select></label>
+            <div class="task-active-rules" id="taskActiveRules"></div>
+            <span class="task-result-count" id="taskResultCount"></span>
+          </div>
+          <div class="task-table-wrap" id="taskTableWrap"><div id="taskTable"></div></div>
+          <div class="task-board" id="taskBoard" hidden></div>
+          <div class="task-empty" id="taskEmpty" hidden><strong>还没有符合条件的任务</strong><span>新建一条任务，或清除当前筛选条件。</span><button class="primary-button" data-task-empty-add>新建任务</button></div>
+        </section>
+
+        <section class="schedule-workspace" id="scheduleWorkspace" hidden aria-label="日程与每日规划工作台">
+          <nav class="schedule-view-tabs" aria-label="日程页面">
+            <button class="active" data-schedule-view="today">今日工作台</button>
+            <button data-schedule-view="total">总日程</button>
+            <button data-schedule-view="series">固定日程</button>
+          </nav>
+          <header class="schedule-header" data-schedule-day-workspace>
+            <div class="schedule-day-controls">
+              <button id="schedulePrevDay" aria-label="前一天" title="前一天">‹</button>
+              <div class="schedule-heading"><span id="scheduleAgendaMeta">今天</span><h1 id="scheduleAgendaTitle">今天的安排</h1></div>
+              <button id="scheduleNextDay" aria-label="后一天" title="后一天">›</button>
+              <button id="scheduleToday">回到今天</button>
+            </div>
+            <div class="schedule-header-actions">
+              <label class="schedule-task-toggle"><input id="scheduleCompletedToggle" type="checkbox" checked> 显示已完成</label>
+              <label class="schedule-task-toggle"><input id="scheduleTaskToggle" type="checkbox" checked> 显示任务</label>
+              <button class="secondary-button schedule-reminder-button" id="scheduleReminderButton" title="应用打开时可站内提醒；授权后切到其他窗口也能收到">开启提醒</button>
+              <button class="secondary-button" id="scheduleCalendarToggle">打开日历</button>
+              <button class="primary-button" id="scheduleAddButton">＋ 新建日程</button>
+            </div>
+          </header>
+          <section class="schedule-calendar-popover" id="scheduleCalendarPanel" hidden aria-label="选择日期">
+            <header>
+              <div class="schedule-month-controls">
+                <button id="schedulePrevMonth" aria-label="上个月">‹</button>
+                <strong id="scheduleMonthTitle">本月</strong>
+                <button id="scheduleNextMonth" aria-label="下个月">›</button>
+              </div>
+              <button id="scheduleCalendarClose" aria-label="关闭日历">×</button>
+            </header>
+            <div class="schedule-weekdays" aria-hidden="true"><span>周一</span><span>周二</span><span>周三</span><span>周四</span><span>周五</span><span>周六</span><span>周日</span></div>
+            <div class="schedule-calendar-grid" id="scheduleCalendarGrid"></div>
+          </section>
+          <div class="schedule-layout">
+            <section class="schedule-page schedule-today-page" id="scheduleTodayPage" data-schedule-page="today">
+              <main class="schedule-agenda-panel" aria-label="当日计划" data-schedule-day-workspace>
+              <form class="schedule-quick-form" id="scheduleQuickForm">
+                <input id="scheduleQuickInput" maxlength="120" autocomplete="off" placeholder="输入一项安排，按 Enter 立即添加">
+                <label class="schedule-quick-time"><span>开始</span><input id="scheduleQuickTime" type="time" aria-label="开始时间（可选）"></label>
+                <label class="schedule-quick-time"><span>结束</span><input id="scheduleQuickEndTime" type="time" aria-label="结束时间（可选）"></label>
+                <label class="schedule-quick-color" title="日程颜色"><input id="scheduleQuickColor" type="color" value="#4f7df3" aria-label="选择日程颜色"><span></span></label>
+                <button class="primary-button" type="submit">添加</button>
+                <input class="schedule-quick-notes" id="scheduleQuickNotes" maxlength="500" autocomplete="off" placeholder="备注（可选）：地点、准备事项或补充说明">
+              </form>
+              <div class="schedule-agenda-list" id="scheduleAgendaList" data-schedule-agenda-empty></div>
+              </main>
+              <aside class="schedule-today-dashboard">
+                <section class="schedule-dashboard-card schedule-stats-card" id="scheduleTodayStats"></section>
+                <section class="schedule-dashboard-card" id="scheduleNextCard"></section>
+                <section class="schedule-dashboard-card" id="scheduleCarryover"></section>
+                <section class="schedule-dashboard-card" id="scheduleUpcoming"></section>
+                <section class="schedule-dashboard-card schedule-daily-note-card"><header><strong>今日便签</strong><span>自动保存</span></header><textarea id="scheduleDailyNote" maxlength="2000" placeholder="记录今天的临时想法、准备事项……"></textarea></section>
+              </aside>
+            </section>
+            <section class="schedule-page schedule-total-page" id="scheduleTotalPage" data-schedule-page="total" hidden>
+              <header class="schedule-page-toolbar"><div><span>按日期浏览所有安排</span><h2>总日程</h2></div><label>显示 <select id="scheduleTotalFilter"><option value="pending">待完成</option><option value="all">全部</option><option value="completed">已完成</option></select></label></header>
+              <div class="schedule-total-list" id="scheduleTotalList"></div>
+            </section>
+            <section class="schedule-page schedule-series-page" id="scheduleSeriesPage" data-schedule-page="series" hidden>
+              <header class="schedule-page-toolbar"><div><span>管理重复规则并预览未来日期</span><h2>固定日程</h2></div><button class="primary-button" id="scheduleSeriesAdd">＋ 新建固定日程</button></header>
+              <div class="schedule-series-list" id="scheduleSeriesList"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="whiteboard-workspace" id="whiteboardWorkspace" hidden aria-label="白板与知识关系画布">
+          <header class="whiteboard-header">
+            <div class="whiteboard-heading"><span>知识画布</span><h1>白板</h1></div>
+            <div class="whiteboard-board-controls">
+              <select id="whiteboardSelect" aria-label="选择白板"></select>
+              <button id="whiteboardNew" title="新建白板">新建</button>
+              <button id="whiteboardRename" title="重命名当前白板">重命名</button>
+              <button class="danger-text" id="whiteboardDelete" title="删除当前白板">删除</button>
+            </div>
+            <div class="whiteboard-history-controls">
+              <button id="whiteboardUndo" title="撤销（Ctrl+Z）" aria-label="撤销">↶</button>
+              <button id="whiteboardRedo" title="重做（Ctrl+Y）" aria-label="重做">↷</button>
+              <button class="active" id="whiteboardGrid" title="切换网格与吸附">网格</button>
+            </div>
+          </header>
+          <div class="whiteboard-canvas" id="whiteboardCanvas" tabindex="0" aria-label="无限白板画布">
+            <div class="whiteboard-stage" id="whiteboardStage">
+              <svg class="whiteboard-edges" id="whiteboardEdges" aria-hidden="true"></svg>
+              <div class="whiteboard-nodes" id="whiteboardNodes"></div>
+            </div>
+            <div class="whiteboard-selection-toolbar" id="whiteboardSelectionToolbar" hidden>
+              <button data-whiteboard-edit>编辑</button><button data-whiteboard-duplicate>复制</button><button data-whiteboard-color>换色</button>
+              <button data-whiteboard-front>置顶</button><button data-whiteboard-back>置底</button><button class="danger-text" data-whiteboard-remove>删除</button>
+            </div>
+            <div class="whiteboard-zoom-controls">
+              <button id="whiteboardZoomOut" aria-label="缩小">−</button><span id="whiteboardZoomLabel">100%</span><button id="whiteboardZoomIn" aria-label="放大">＋</button>
+              <button id="whiteboardFit">适应内容</button><button id="whiteboardReset">重置视图</button>
+            </div>
+            <div class="whiteboard-add-toolbar" id="whiteboardAddToolbar" aria-label="添加白板卡片">
+              <button data-whiteboard-add="text"><span>文</span>文本</button><button data-whiteboard-add="note"><span>记</span>笔记</button>
+              <button data-whiteboard-add="task"><span>任</span>任务</button><button data-whiteboard-add="image"><span>图</span>图片</button>
+              <button data-whiteboard-add="link"><span>链</span>网页</button><button data-whiteboard-add="group"><span>组</span>分组</button>
+            </div>
+            <div id="whiteboardAddMenu" hidden></div>
+            <input id="whiteboardImageInput" type="file" accept="image/jpeg,image/png,image/webp,image/gif" multiple hidden />
+          </div>
+        </section>
+
+        <section class="note-panel" id="notePanel" data-context="note-list-space">
+          <div class="panel-header">
+            <div><h2 id="viewTitle">全部笔记</h2><span id="viewCount">0 篇</span></div>
+            <div class="panel-actions">
+              <select id="sortSelect" aria-label="排序方式" title="排序方式">
+                <option value="updated">最近编辑</option>
+                <option value="created">最近创建</option>
+                <option value="title">标题排序</option>
+              </select>
+              <button class="icon-button mobile-only" id="listClose" aria-label="关闭笔记列表">×</button>
+            </div>
+          </div>
+          <div class="note-list" id="noteList" data-context="note-list-space"></div>
+        </section>
+
+        <div class="panel-resizer" id="listResizer" data-resizer="list" role="separator" aria-label="调整笔记列表宽度" tabindex="0">
+          <button data-collapse-panel="list" aria-label="收起笔记列表">‹</button>
+        </div>
+
+        <section class="editor-panel" id="editorPanel" data-context="editor-space">
+          <div class="empty-state" id="emptyState">
+            <div class="empty-illustration">
+              <svg viewBox="0 0 80 80" aria-hidden="true"><path d="M23 13h24l12 12v42H23z" /><path d="M47 13v14h14M32 39h18M32 48h18M32 57h11" /></svg>
+            </div>
+            <h2>选择一篇笔记</h2>
+            <p>从左侧列表打开，或新建一篇记录此刻的想法。</p>
+            <button class="primary-button" id="newNoteEmpty"><span>＋</span> 新建笔记</button>
+          </div>
+
+          <section class="file-viewer" id="fileViewer" hidden>
+            <header class="file-viewer-header">
+              <div><strong id="fileViewerName">本地文件</strong><span id="fileViewerMeta"></span></div>
+              <div>
+                <button class="text-button" id="fileViewerDownload">下载</button>
+                <button class="icon-button danger" id="fileViewerDelete" title="删除文件" aria-label="删除文件">×</button>
+                <button class="icon-button" id="fileViewerClose" title="关闭查看" aria-label="关闭查看">×</button>
+              </div>
+            </header>
+            <div class="file-viewer-body">
+              <iframe id="filePdfViewer" title="PDF 文件查看器" hidden></iframe>
+              <img id="fileImageViewer" alt="本地图片预览" hidden />
+              <pre id="fileTextViewer" hidden></pre>
+              <div class="file-unsupported" id="fileUnsupported" hidden><strong>此文件可保存和下载</strong><p>当前浏览器无法在离线页面内直接预览这种格式。</p><button class="primary-button" id="fileUnsupportedDownload">下载文件</button></div>
+            </div>
+          </section>
+
+          <section class="link-viewer" id="linkViewer" hidden>
+            <header class="link-viewer-header">
+              <button class="text-button link-viewer-back" id="linkViewerBack">← 返回笔记</button>
+              <div class="link-viewer-address"><span id="linkViewerStatus">正在加载</span><strong id="linkViewerUrl"></strong></div>
+              <div class="link-viewer-actions">
+                <button class="text-button" id="linkViewerReload">刷新</button>
+                <button class="primary-button" id="linkViewerNewTab">新标签页打开</button>
+                <button class="icon-button" id="linkViewerClose" title="关闭当前网页标签" aria-label="关闭当前网页标签">×</button>
+              </div>
+            </header>
+            <nav class="link-viewer-tabs" id="linkViewerTabs" aria-label="已打开的网页"></nav>
+            <div class="link-viewer-body">
+              <div class="link-viewer-frames" id="linkViewerFrames"></div>
+              <div class="link-viewer-notice">网页能否内嵌由目标站点决定；若显示“拒绝连接”，EasyNote 无法安全绕过，可复制内容到笔记或在新标签页打开。</div>
+            </div>
+          </section>
+
+          <div class="editor" id="editor" hidden>
+            <div class="editor-topline">
+              <button class="back-button mobile-only" id="backToList">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6" /></svg>笔记列表
+              </button>
+              <span class="edited-time" id="editedTime"></span>
+              <div class="editor-actions">
+                <button class="text-button editor-view-button" id="splitViewButton" title="同时打开两篇笔记">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 4v16"/></svg><span>分栏</span>
+                </button>
+                <button class="text-button editor-view-button" id="outlineButton" title="显示或隐藏大纲">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11"/><circle cx="4" cy="6" r="1" fill="currentColor" stroke="none"/><circle cx="4" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="4" cy="18" r="1" fill="currentColor" stroke="none"/></svg><span>大纲</span>
+                </button>
+                <button class="text-button" id="modeToggle" title="切换编辑模式">Markdown</button>
+                <button class="icon-button" id="favoriteButton" aria-label="收藏笔记" title="收藏">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-2.9-5.6 2.9 1.1-6.2L3 9.6l6.2-.9z" /></svg>
+                </button>
+                <button class="icon-button" id="downloadMarkdown" aria-label="导出 Markdown" title="导出当前笔记">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M8 11l4 4 4-4M5 20h14" /></svg>
+                </button>
+                <button class="icon-button danger" id="deleteButton" aria-label="删除笔记" title="移到回收站">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M7 7l1 14h8l1-14" /></svg>
+                </button>
+                <button class="icon-button editor-more" id="editorMore" aria-label="更多笔记操作" title="更多操作">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1" fill="currentColor" stroke="none"/></svg>
+                </button>
+              </div>
+            </div>
+
+            <div class="editor-scroll" id="editorScroll">
+              <div class="note-meta" data-context="note-meta">
+                <input class="title-input" id="titleInput" data-context="meta-input" aria-label="笔记标题" placeholder="无标题笔记" />
+                <div class="meta-row">
+                  <label><span>文件夹</span><select id="categorySelect"></select></label>
+                  <label class="tag-field"><span>标签</span><input id="tagInput" data-context="meta-input" placeholder="输入标签，以逗号分隔" /></label>
+                </div>
+              </div>
+
+              <div class="format-toolbar" id="formatToolbar" aria-label="格式工具栏">
+                <button data-command="bold" title="加粗"><strong>B</strong></button>
+                <button data-command="italic" title="斜体"><em>I</em></button>
+                <button data-command="formatBlock" data-value="h2" title="二级标题">H2</button>
+                <button data-command="formatBlock" data-value="h3" title="三级标题">H3</button>
+                <span></span>
+                <button data-command="insertUnorderedList" title="无序列表">• 列表</button>
+                <button data-command="insertOrderedList" title="有序列表">1. 列表</button>
+                <button data-command="formatBlock" data-value="blockquote" title="引用">❝</button>
+                <button data-command="formatBlock" data-value="pre" title="代码块">&lt;/&gt;</button>
+                <button id="insertImage" title="插入本地图片">图片</button>
+                <button id="insertLink" title="插入链接">链接</button>
+                <button id="clearFormat" title="清除格式">清除</button>
+              </div>
+
+              <div class="content-editor" id="contentEditor" data-context="editor-content" contenteditable="true" data-placeholder="开始写下你的想法…" spellcheck="true"></div>
+              <textarea class="markdown-editor" id="markdownEditor" aria-label="Markdown 编辑器" placeholder="# 开始写作…" hidden></textarea>
+              <div class="image-drop-hint" id="imageDropHint"><span>释放以插入图片</span></div>
+              <div class="image-resize-overlay" id="imageResizeOverlay" hidden>
+                <span class="image-size-label" id="imageSizeLabel"></span>
+                <button class="image-move-handle" id="imageMoveHandle" aria-label="拖动调整图片位置" title="拖动调整位置">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v18M3 12h18M8 7l4-4 4 4M8 17l4 4 4-4M7 8l-4 4 4 4M17 8l4 4-4 4"/></svg>
+                </button>
+                <button class="image-width-handle" id="imageWidthHandle" aria-label="只调整图片宽度" title="左右拖动调整宽度"></button>
+                <button class="image-height-handle" id="imageHeightHandle" aria-label="只调整图片高度" title="上下拖动调整高度"></button>
+                <button class="image-resize-handle" id="imageResizeHandle" aria-label="同时调整图片宽度和高度" title="拖动调整宽度和高度"></button>
+              </div>
+              <div class="image-position-guide" id="imagePositionGuide" aria-hidden="true" hidden>
+                <span>自由位置</span><div class="image-position-track"><i id="imagePositionCursor"></i></div><em id="imagePositionLabel">50%</em>
+              </div>
+              <div class="image-drop-marker" id="imageDropMarker" aria-hidden="true" hidden></div>
+            </div>
+
+            <div class="trash-actions" id="trashActions" hidden>
+              <span>这篇笔记在回收站中</span>
+              <button class="secondary-button" id="restoreButton">恢复笔记</button>
+              <button class="danger-button" id="permanentDeleteButton">永久删除</button>
+            </div>
+          </div>
+
+          <div class="editor-split-resizer" id="editorSplitResizer" role="separator" aria-label="调整两个笔记的宽度" hidden></div>
+
+          <section class="secondary-editor" id="secondaryEditor" aria-label="右侧笔记" hidden>
+            <header class="secondary-header">
+              <select id="secondaryNoteSelect" aria-label="选择右侧笔记"></select>
+              <button class="icon-button" id="secondaryClose" aria-label="关闭分栏" title="关闭分栏">×</button>
+            </header>
+            <div class="secondary-scroll" id="secondaryScroll">
+              <input class="secondary-title" id="secondaryTitle" aria-label="右侧笔记标题" placeholder="无标题笔记" />
+              <div class="secondary-content content-editor" id="secondaryContent" contenteditable="true" data-placeholder="开始写下你的想法…" spellcheck="true"></div>
+            </div>
+          </section>
+
+          <aside class="outline-panel" id="outlinePanel" aria-label="笔记大纲" hidden>
+            <header><strong id="outlineTitle">笔记大纲</strong><button class="icon-button" id="outlineClose" aria-label="关闭大纲">×</button></header>
+            <nav class="outline-list" id="outlineList"></nav>
+          </aside>
+        </section>
+      </main>
+    </div>
+    <div class="sidebar-scrim" id="sidebarScrim"></div>
+    <input id="imageFile" type="file" accept="image/jpeg,image/png,image/webp,image/gif" multiple hidden />
+    <input id="localFileInput" type="file" multiple hidden />
+    <input id="taskAttachmentInput" type="file" multiple hidden />
+    <div class="context-menu" id="contextMenu" role="menu" hidden></div>
+    <div class="dialog-backdrop" id="dialogBackdrop" hidden>
+      <form class="app-dialog" id="appDialog" role="dialog" aria-modal="true" aria-labelledby="dialogTitle">
+        <header><h2 id="dialogTitle">请输入</h2><button class="dialog-close" id="dialogClose" type="button" aria-label="关闭">×</button></header>
+        <p class="dialog-message" id="dialogMessage" hidden></p>
+        <label class="dialog-field" id="dialogField"><span id="dialogLabel">名称</span><input id="dialogInput" autocomplete="off" /></label>
+        <p class="dialog-error" id="dialogError" hidden></p>
+        <footer><button class="secondary-button" id="dialogCancel" type="button">取消</button><button class="primary-button" id="dialogConfirm" type="submit">确定</button></footer>
+      </form>
+    </div>
+    <div class="safety-backdrop" id="safetyBackdrop" hidden>
+      <section class="safety-center" role="dialog" aria-modal="true" aria-labelledby="safetyTitle">
+        <header class="safety-header">
+          <div><span class="safety-kicker">EasyNote</span><h2 id="safetyTitle">数据安全中心</h2><p>检查本地数据库、历史版本和自动备份是否正常。</p></div>
+          <button class="dialog-close" id="safetyClose" type="button" aria-label="关闭">×</button>
+        </header>
+        <div class="safety-scroll">
+          <div class="safety-alert" id="protocolAlert" hidden>
+            <strong>当前仍通过本地文件打开</strong>
+            <p>请先导出迁移备份，再运行 start-easynote.bat。旧数据不会被自动删除。</p>
+            <button class="primary-button" id="migrationExportButton">导出迁移备份</button>
+          </div>
+          <div class="safety-grid">
+            <article class="safety-card"><span>数据库</span><strong id="databaseSafetyState">检查中</strong><p id="databaseSafetyDetail">正在读取独立记录</p></article>
+            <article class="safety-card"><span>浏览器存储</span><strong id="persistentStorageState">检查中</strong><p id="storageQuotaDetail">正在估算容量</p></article>
+            <article class="safety-card"><span>目录备份</span><strong id="directoryBackupState">未配置</strong><p id="directoryBackupDetail">请选择一个本地目录</p></article>
+            <article class="safety-card"><span>最近验证保存</span><strong id="lastVerifiedSave">暂无</strong><p id="pendingSaveDetail">没有待处理写入</p></article>
+          </div>
+          <section class="safety-section">
+            <div><h3>存储保护</h3><p>申请持久存储可降低浏览器自动清理站点数据的风险。</p></div>
+            <div class="safety-actions"><button class="secondary-button" id="requestPersistenceButton">申请持久存储</button><button class="secondary-button" id="runIntegrityButton">重新检查完整性</button><button class="secondary-button" id="retrySaveButton">重试失败写入</button></div>
+          </section>
+          <section class="safety-section">
+            <div><h3>自动多代备份</h3><p>有变更时每 10 分钟生成 JSON 快照，附件按内容哈希去重保存。</p></div>
+            <div class="safety-actions"><button class="secondary-button" id="chooseBackupDirectoryButton">选择备份目录</button><button class="primary-button" id="backupNowButton">立即备份</button><button class="secondary-button" id="verifyBackupButton">验证最近备份</button></div>
+          </section>
+          <section class="safety-section safety-history-section">
+            <div><h3>当前笔记历史</h3><p>切换笔记、手动保存及连续编辑期间自动创建，保留最多 50 个版本和 30 天。</p></div>
+            <div class="history-list" id="historyList"><p class="safety-empty">打开一篇笔记后可查看历史版本。</p></div>
+          </section>
+          <section class="safety-section safety-history-section">
+            <div><h3>紧急恢复</h3><p>永久删除和批量清理的内容仍保留 30 天。</p></div>
+            <div class="history-list" id="recoveryList"><p class="safety-empty">暂无可恢复内容。</p></div>
+          </section>
+        </div>
+        <footer class="safety-footer"><button class="secondary-button" id="portableExportButton">导出便携式完整 JSON</button><span id="safetyUpdatedAt"></span></footer>
+      </section>
+    </div>
+    <div class="migration-banner" id="migrationBanner" hidden>
+      <div><strong>请迁移到安全启动模式</strong><span>先导出旧数据，再运行 start-easynote.bat；旧数据库会继续保留。</span></div>
+      <button id="migrationBannerExport">导出迁移备份</button><button id="migrationBannerDismiss" aria-label="暂时关闭">×</button>
+    </div>
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script src="data-safety.js"></script>
+    <script src="task-manager.js"></script>
+    <script src="schedule-manager.js"></script>
+    <script src="whiteboard-manager.js"></script>
+    <script src="app-v2.js"></script>
+  </body>
+</html>
