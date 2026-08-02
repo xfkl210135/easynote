@@ -141,69 +141,8 @@
           <div class="task-empty" id="taskEmpty" hidden><strong>还没有符合条件的任务</strong><span>新建一条任务，或清除当前筛选条件。</span><button class="primary-button" data-task-empty-add>新建任务</button></div>
         </section>
 
-        <section class="schedule-workspace" id="scheduleWorkspace" hidden aria-label="日程与每日规划工作台">
-          <nav class="schedule-view-tabs" aria-label="日程页面">
-            <button class="active" data-schedule-view="today">今日工作台</button>
-            <button data-schedule-view="total">总日程</button>
-            <button data-schedule-view="series">固定日程</button>
-          </nav>
-          <header class="schedule-header" data-schedule-day-workspace>
-            <div class="schedule-day-controls">
-              <button id="schedulePrevDay" aria-label="前一天" title="前一天">‹</button>
-              <div class="schedule-heading"><span id="scheduleAgendaMeta">今天</span><h1 id="scheduleAgendaTitle">今天的安排</h1></div>
-              <button id="scheduleNextDay" aria-label="后一天" title="后一天">›</button>
-              <button id="scheduleToday">回到今天</button>
-            </div>
-            <div class="schedule-header-actions">
-              <label class="schedule-task-toggle"><input id="scheduleCompletedToggle" type="checkbox" checked> 显示已完成</label>
-              <label class="schedule-task-toggle"><input id="scheduleTaskToggle" type="checkbox" checked> 显示任务</label>
-              <button class="secondary-button schedule-reminder-button" id="scheduleReminderButton" title="应用打开时可站内提醒；授权后切到其他窗口也能收到">开启提醒</button>
-              <button class="secondary-button" id="scheduleCalendarToggle">打开日历</button>
-              <button class="primary-button" id="scheduleAddButton">＋ 新建日程</button>
-            </div>
-          </header>
-          <section class="schedule-calendar-popover" id="scheduleCalendarPanel" hidden aria-label="选择日期">
-            <header>
-              <div class="schedule-month-controls">
-                <button id="schedulePrevMonth" aria-label="上个月">‹</button>
-                <strong id="scheduleMonthTitle">本月</strong>
-                <button id="scheduleNextMonth" aria-label="下个月">›</button>
-              </div>
-              <button id="scheduleCalendarClose" aria-label="关闭日历">×</button>
-            </header>
-            <div class="schedule-weekdays" aria-hidden="true"><span>周一</span><span>周二</span><span>周三</span><span>周四</span><span>周五</span><span>周六</span><span>周日</span></div>
-            <div class="schedule-calendar-grid" id="scheduleCalendarGrid"></div>
-          </section>
-          <div class="schedule-layout">
-            <section class="schedule-page schedule-today-page" id="scheduleTodayPage" data-schedule-page="today">
-              <main class="schedule-agenda-panel" aria-label="当日计划" data-schedule-day-workspace>
-              <form class="schedule-quick-form" id="scheduleQuickForm">
-                <input id="scheduleQuickInput" maxlength="120" autocomplete="off" placeholder="输入一项安排，按 Enter 立即添加">
-                <label class="schedule-quick-time"><span>开始</span><input id="scheduleQuickTime" type="time" aria-label="开始时间（可选）"></label>
-                <label class="schedule-quick-time"><span>结束</span><input id="scheduleQuickEndTime" type="time" aria-label="结束时间（可选）"></label>
-                <label class="schedule-quick-color" title="日程颜色"><input id="scheduleQuickColor" type="color" value="#4f7df3" aria-label="选择日程颜色"><span></span></label>
-                <button class="primary-button" type="submit">添加</button>
-                <input class="schedule-quick-notes" id="scheduleQuickNotes" maxlength="500" autocomplete="off" placeholder="备注（可选）：地点、准备事项或补充说明">
-              </form>
-              <div class="schedule-agenda-list" id="scheduleAgendaList" data-schedule-agenda-empty></div>
-              </main>
-              <aside class="schedule-today-dashboard">
-                <section class="schedule-dashboard-card schedule-stats-card" id="scheduleTodayStats"></section>
-                <section class="schedule-dashboard-card" id="scheduleNextCard"></section>
-                <section class="schedule-dashboard-card" id="scheduleCarryover"></section>
-                <section class="schedule-dashboard-card" id="scheduleUpcoming"></section>
-                <section class="schedule-dashboard-card schedule-daily-note-card"><header><strong>今日便签</strong><span>自动保存</span></header><textarea id="scheduleDailyNote" maxlength="2000" placeholder="记录今天的临时想法、准备事项……"></textarea></section>
-              </aside>
-            </section>
-            <section class="schedule-page schedule-total-page" id="scheduleTotalPage" data-schedule-page="total" hidden>
-              <header class="schedule-page-toolbar"><div><span>按日期浏览所有安排</span><h2>总日程</h2></div><label>显示 <select id="scheduleTotalFilter"><option value="pending">待完成</option><option value="all">全部</option><option value="completed">已完成</option></select></label></header>
-              <div class="schedule-total-list" id="scheduleTotalList"></div>
-            </section>
-            <section class="schedule-page schedule-series-page" id="scheduleSeriesPage" data-schedule-page="series" hidden>
-              <header class="schedule-page-toolbar"><div><span>管理重复规则并预览未来日期</span><h2>固定日程</h2></div><button class="primary-button" id="scheduleSeriesAdd">＋ 新建固定日程</button></header>
-              <div class="schedule-series-list" id="scheduleSeriesList"></div>
-            </section>
-          </div>
+        <section class="schedule-workspace" id="scheduleWorkspace" hidden aria-label="时间与规划中心">
+          <div id="productivityCenterMount"></div>
         </section>
 
         <section class="whiteboard-workspace" id="whiteboardWorkspace" hidden aria-label="白板与知识关系画布">

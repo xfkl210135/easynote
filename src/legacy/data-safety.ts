@@ -2,7 +2,7 @@
 "use strict";
 
   const DB_NAME = "easynote-db";
-  const DB_VERSION = 7;
+  const DB_VERSION = 8;
   const DAY = 86400000;
   const HISTORY_LIMIT = 50;
   const HISTORY_AGE = 30 * DAY;
@@ -12,7 +12,8 @@
     attachments: "attachments", history: "history", recovery: "recovery",
     operations: "operations", meta: "meta", settings: "settings",
     tasks: "tasks", taskFields: "taskFields", taskViews: "taskViews", taskHistory: "taskHistory",
-    scheduleEntries: "scheduleEntries", scheduleSeries: "scheduleSeries", scheduleOccurrenceStates: "scheduleOccurrenceStates", scheduleDailyNotes: "scheduleDailyNotes", whiteboards: "whiteboards"
+    scheduleEntries: "scheduleEntries", scheduleSeries: "scheduleSeries", scheduleOccurrenceStates: "scheduleOccurrenceStates", scheduleDailyNotes: "scheduleDailyNotes", whiteboards: "whiteboards",
+    focusSessions: "focusSessions", reviews: "reviews", goals: "goals", milestones: "milestones"
   };
 
   const makeId = (prefix = "id") => `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
@@ -91,6 +92,10 @@
       this.integrityReport = null;
       this.backupDirectoryHandle = null;
       this.wasEmpty = false;
+      this.versionUpgradeChecked = false;
+      this.versionUpgradeFailure = null;
+      this.migrationPrepared = false;
+      this.migrationFromVersion = null;
     }
 
     emitStatus(status, detail = {}) {
@@ -106,6 +111,7 @@
 
     async open() {
       if (this.db) return this.db;
+      await this.prepareVersionUpgrade();
       this.db = await new Promise((resolve, reject) => {
         const request = indexedDB.open(DB_NAME, DB_VERSION);
         request.onupgradeneeded = () => {
@@ -138,6 +144,23 @@
           if (!db.objectStoreNames.contains(STORES.scheduleOccurrenceStates)) db.createObjectStore(STORES.scheduleOccurrenceStates, { keyPath: "id" });
           if (!db.objectStoreNames.contains(STORES.scheduleDailyNotes)) db.createObjectStore(STORES.scheduleDailyNotes, { keyPath: "id" });
           if (!db.objectStoreNames.contains(STORES.whiteboards)) db.createObjectStore(STORES.whiteboards, { keyPath: "id" });
+          if (!db.objectStoreNames.contains(STORES.focusSessions)) {
+            const store = db.createObjectStore(STORES.focusSessions, { keyPath: "id" });
+            store.createIndex("status", "status", { unique: false });
+            store.createIndex("startedAt", "startedAt", { unique: false });
+            store.createIndex("taskId", "taskId", { unique: false });
+          }
+          if (!db.objectStoreNames.contains(STORES.reviews)) {
+            const store = db.createObjectStore(STORES.reviews, { keyPath: "id" });
+            store.createIndex("periodType", "periodType", { unique: false });
+            store.createIndex("periodStart", "periodStart", { unique: false });
+          }
+          if (!db.objectStoreNames.contains(STORES.goals)) db.createObjectStore(STORES.goals, { keyPath: "id" });
+          if (!db.objectStoreNames.contains(STORES.milestones)) {
+            const store = db.createObjectStore(STORES.milestones, { keyPath: "id" });
+            store.createIndex("goalId", "goalId", { unique: false });
+            store.createIndex("dueDate", "dueDate", { unique: false });
+          }
           if (!db.objectStoreNames.contains(STORES.taskHistory)) {
             const store = db.createObjectStore(STORES.taskHistory, { keyPath: "id" });
             store.createIndex("entityId", "entityId", { unique: false });
@@ -149,7 +172,44 @@
         request.onblocked = () => this.emitSafety({ warning: "数据库升级被其他 EasyNote 页面阻塞，请关闭其他页面后重试。" });
       });
       this.db.onversionchange = () => { this.db.close(); this.emitSafety({ warning: "数据结构已更新，请刷新页面。" }); };
+      if (this.migrationPrepared) {
+        try {
+          const transaction = this.db.transaction(STORES.meta, "readwrite");
+          transaction.objectStore(STORES.meta).put({ key: "databaseV8Migration", state: "verified", fromVersion: this.migrationFromVersion, completedAt: isoNow(), recoveryPrepared: true });
+          await transactionDone(transaction);
+        } catch (error) {
+          this.db.close(); this.db = null; this.versionUpgradeFailure = error;
+          throw new Error(`数据库升级完成标记写入失败：${error?.message || error}`);
+        }
+      }
       return this.db;
+    }
+
+    async prepareVersionUpgrade() {
+      if (this.versionUpgradeFailure) throw this.versionUpgradeFailure;
+      if (this.versionUpgradeChecked) return;
+      const existing = await new Promise((resolve, reject) => {
+        const request = indexedDB.open(DB_NAME);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error || new Error("无法检查旧数据库"));
+        request.onupgradeneeded = () => { /* A new database has no data to preserve. */ };
+      });
+      try {
+        if (existing.version >= DB_VERSION || existing.objectStoreNames.length === 0) { this.versionUpgradeChecked = true; return; }
+        if (!existing.objectStoreNames.contains(STORES.recovery) || !existing.objectStoreNames.contains(STORES.meta)) throw new Error("旧数据库缺少恢复仓库，已停止升级以避免覆盖原数据");
+        const names = [STORES.notes, STORES.folders, STORES.files, STORES.tasks, STORES.taskFields, STORES.taskViews, STORES.scheduleEntries, STORES.scheduleSeries, STORES.scheduleOccurrenceStates, STORES.scheduleDailyNotes, STORES.whiteboards].filter((name) => existing.objectStoreNames.contains(name));
+        const transaction = existing.transaction([...names, STORES.recovery, STORES.meta], "readwrite");
+        const values = await Promise.all(names.map((name) => requestResult(transaction.objectStore(name).getAll())));
+        const byStore = Object.fromEntries(names.map((name, index) => [name, values[index]]));
+        const createdAt = isoNow();
+        transaction.objectStore(STORES.recovery).put({ id: makeId("recovery"), kind: "database-v8-migration", label: "升级时间与规划中心前的完整数据", createdAt, expiresAt: new Date(Date.now() + HISTORY_AGE).toISOString(), payload: { version: 8, categories: byStore[STORES.folders] || [], files: byStore[STORES.files] || [], notes: byStore[STORES.notes] || [], tasks: byStore[STORES.tasks] || [], taskFields: byStore[STORES.taskFields] || [], taskViews: byStore[STORES.taskViews] || [], scheduleEntries: byStore[STORES.scheduleEntries] || [], scheduleSeries: byStore[STORES.scheduleSeries] || [], scheduleOccurrenceStates: byStore[STORES.scheduleOccurrenceStates] || [], scheduleDailyNotes: byStore[STORES.scheduleDailyNotes] || [], whiteboards: byStore[STORES.whiteboards] || [] } });
+        transaction.objectStore(STORES.meta).put({ key: "databaseV8MigrationPrepared", state: "prepared", createdAt, fromVersion: existing.version });
+        await transactionDone(transaction);
+        this.migrationPrepared = true; this.migrationFromVersion = existing.version; this.versionUpgradeChecked = true;
+      } catch (error) {
+        this.versionUpgradeFailure = error;
+        throw error;
+      } finally { existing.close(); }
     }
 
     async get(storeName, key) {
@@ -189,11 +249,11 @@
       }
       const attachments = await this.getAll(STORES.attachments);
       attachments.forEach((record) => this.attachmentRecords.set(record.id, record));
-      const [folders, files, tasks, taskFields, taskViews, scheduleEntries, scheduleSeries, scheduleOccurrenceStates, scheduleDailyNotes, whiteboards] = await Promise.all([
+      const [folders, files, tasks, taskFields, taskViews, scheduleEntries, scheduleSeries, scheduleOccurrenceStates, scheduleDailyNotes, whiteboards, focusSessions, reviews, goals, milestones] = await Promise.all([
         this.getAll(STORES.folders), this.getAll(STORES.files), this.getAll(STORES.tasks),
-        this.getAll(STORES.taskFields), this.getAll(STORES.taskViews), this.getAll(STORES.scheduleEntries), this.getAll(STORES.scheduleSeries), this.getAll(STORES.scheduleOccurrenceStates), this.getAll(STORES.scheduleDailyNotes), this.getAll(STORES.whiteboards)
+        this.getAll(STORES.taskFields), this.getAll(STORES.taskViews), this.getAll(STORES.scheduleEntries), this.getAll(STORES.scheduleSeries), this.getAll(STORES.scheduleOccurrenceStates), this.getAll(STORES.scheduleDailyNotes), this.getAll(STORES.whiteboards), this.getAll(STORES.focusSessions), this.getAll(STORES.reviews), this.getAll(STORES.goals), this.getAll(STORES.milestones)
       ]);
-      if (!notes.length && !folders.length && !files.length && !tasks.length && !taskFields.length && !taskViews.length && !scheduleEntries.length && !scheduleSeries.length && !scheduleOccurrenceStates.length && !scheduleDailyNotes.length && !whiteboards.length) { this.wasEmpty = true; return null; }
+      if (!notes.length && !folders.length && !files.length && !tasks.length && !taskFields.length && !taskViews.length && !scheduleEntries.length && !scheduleSeries.length && !scheduleOccurrenceStates.length && !scheduleDailyNotes.length && !whiteboards.length && !focusSessions.length && !reviews.length && !goals.length && !milestones.length) { this.wasEmpty = true; return null; }
       const state = {
         version: 8,
         categories: folders.map(({ checksum, ...folder }) => folder),
@@ -206,6 +266,10 @@
         scheduleSeries: scheduleSeries.map(({ checksum, ...series }) => series),
         scheduleOccurrenceStates: scheduleOccurrenceStates.map(({ checksum, ...occurrence }) => occurrence),
         scheduleDailyNotes: scheduleDailyNotes.map(({ checksum, ...dailyNote }) => dailyNote),
+        focusSessions: focusSessions.map(({ checksum, ...session }) => session),
+        reviews: reviews.map(({ checksum, ...review }) => review),
+        goals: goals.map(({ checksum, ...goal }) => goal),
+        milestones: milestones.map(({ checksum, ...milestone }) => milestone),
         whiteboards: whiteboards.map(({ checksum, ...board }) => board)
       };
       const lastCommit = await this.get(STORES.meta, "lastCommit");
@@ -350,9 +414,9 @@
       (inputState.tasks || []).forEach((task) => { const prepared = preparedInputTasks.get(task.id); if (prepared) task.values = prepared.values; });
       const preparedInputBoards = new Map((snapshot.whiteboards || []).map((board) => [board.id, board]));
       (inputState.whiteboards || []).forEach((board) => { const prepared = preparedInputBoards.get(board.id); if (prepared) board.nodes = prepared.nodes; });
-      const [existingNotes, existingFolders, existingFiles, existingTasks, existingTaskFields, existingTaskViews, existingScheduleEntries, existingScheduleSeries, existingScheduleOccurrenceStates, existingScheduleDailyNotes, existingWhiteboards] = await Promise.all([
+      const [existingNotes, existingFolders, existingFiles, existingTasks, existingTaskFields, existingTaskViews, existingScheduleEntries, existingScheduleSeries, existingScheduleOccurrenceStates, existingScheduleDailyNotes, existingWhiteboards, existingFocusSessions, existingReviews, existingGoals, existingMilestones] = await Promise.all([
         this.getAll(STORES.notes), this.getAll(STORES.folders), this.getAll(STORES.files),
-        this.getAll(STORES.tasks), this.getAll(STORES.taskFields), this.getAll(STORES.taskViews), this.getAll(STORES.scheduleEntries), this.getAll(STORES.scheduleSeries), this.getAll(STORES.scheduleOccurrenceStates), this.getAll(STORES.scheduleDailyNotes), this.getAll(STORES.whiteboards)
+        this.getAll(STORES.tasks), this.getAll(STORES.taskFields), this.getAll(STORES.taskViews), this.getAll(STORES.scheduleEntries), this.getAll(STORES.scheduleSeries), this.getAll(STORES.scheduleOccurrenceStates), this.getAll(STORES.scheduleDailyNotes), this.getAll(STORES.whiteboards), this.getAll(STORES.focusSessions), this.getAll(STORES.reviews), this.getAll(STORES.goals), this.getAll(STORES.milestones)
       ]);
       const noteMap = new Map(existingNotes.map((item) => [item.id, item]));
       const folderMap = new Map(existingFolders.map((item) => [item.id, item]));
@@ -365,6 +429,10 @@
       const scheduleOccurrenceMap = new Map(existingScheduleOccurrenceStates.map((item) => [item.id, item]));
       const scheduleDailyNoteMap = new Map(existingScheduleDailyNotes.map((item) => [item.id, item]));
       const whiteboardMap = new Map(existingWhiteboards.map((item) => [item.id, item]));
+      const focusSessionMap = new Map(existingFocusSessions.map((item) => [item.id, item]));
+      const reviewMap = new Map(existingReviews.map((item) => [item.id, item]));
+      const goalMap = new Map(existingGoals.map((item) => [item.id, item]));
+      const milestoneMap = new Map(existingMilestones.map((item) => [item.id, item]));
       const preparedNotes = [];
       const changedNotes = [];
       for (const note of snapshot.notes || []) {
@@ -412,7 +480,7 @@
       const scheduleResult = await prepareVersioned(snapshot.scheduleEntries, scheduleMap, (entry) => ({
         id: entry.id, title: entry.title || "未命名日程", date: entry.date || "", allDay: entry.allDay !== false,
         startTime: entry.allDay === false ? entry.startTime || "" : "", endTime: entry.allDay === false ? entry.endTime || "" : "",
-        notes: entry.notes || "", color: entry.color || "#4f7df3", completed: Boolean(entry.completed), taskId: entry.taskId || "",
+        notes: entry.notes || "", color: entry.color || "#4f7df3", completed: Boolean(entry.completed), taskId: entry.taskId || "", noteId: entry.noteId || "", url: entry.url || "", urlLabel: entry.urlLabel || "",
         reminderMode: ["auto", "none", "custom"].includes(entry.reminderMode) ? entry.reminderMode : "auto",
         customReminderAt: entry.reminderMode === "custom" ? entry.customReminderAt || "" : "",
         isTemplate: Boolean(entry.isTemplate), seriesId: entry.seriesId || "",
@@ -424,7 +492,7 @@
       const scheduleSeriesResult = await prepareVersioned(snapshot.scheduleSeries, scheduleSeriesMap, (series) => ({
         id: series.id, title: series.title || "未命名固定日程", startDate: series.startDate || "", allDay: series.allDay !== false,
         startTime: series.allDay === false ? series.startTime || "" : "", endTime: series.allDay === false ? series.endTime || "" : "",
-        notes: series.notes || "", color: series.color || "#4f7df3", taskId: series.taskId || "", reminderMode: series.reminderMode === "none" ? "none" : "auto",
+        notes: series.notes || "", color: series.color || "#4f7df3", taskId: series.taskId || "", noteId: series.noteId || "", url: series.url || "", urlLabel: series.urlLabel || "", reminderMode: series.reminderMode === "none" ? "none" : "auto",
         recurrenceType: ["daily", "weekdays", "weekly", "monthly"].includes(series.recurrenceType) ? series.recurrenceType : "daily",
         recurrenceInterval: Math.max(1, Number(series.recurrenceInterval) || 1), weekdays: Array.isArray(series.weekdays) ? [...new Set(series.weekdays.map(Number).filter((day) => day >= 0 && day <= 6))].sort() : [],
         dayOfMonth: Math.min(31, Math.max(1, Number(series.dayOfMonth) || 1)), until: series.until || "", active: series.active !== false,
@@ -436,13 +504,17 @@
       }));
       const scheduleDailyNoteResult = await prepareVersioned(snapshot.scheduleDailyNotes, scheduleDailyNoteMap, (dailyNote) => ({ id: dailyNote.id || dailyNote.date, date: dailyNote.date || dailyNote.id || "", content: String(dailyNote.content || ""), updatedAt: dailyNote.updatedAt || isoNow() }));
       const whiteboardResult = await prepareVersioned(snapshot.whiteboards, whiteboardMap, (board) => this.whiteboardPayload(board));
+      const focusResult = await prepareVersioned(snapshot.focusSessions, focusSessionMap, (session) => ({ id: session.id, label: String(session.label || "专注"), taskId: session.taskId || "", scheduleEntryId: session.scheduleEntryId || "", phase: ["focus", "awaitingBreak", "break"].includes(session.phase) ? session.phase : "focus", status: ["active", "paused", "completed", "abandoned"].includes(session.status) ? session.status : "completed", focusMinutes: Math.max(1, Number(session.focusMinutes) || 25), breakMinutes: Math.max(1, Number(session.breakMinutes) || 5), startedAt: session.startedAt || isoNow(), phaseStartedAt: session.phaseStartedAt || session.startedAt || isoNow(), endsAt: session.endsAt || isoNow(), pausedAt: session.pausedAt || null, remainingMs: Math.max(0, Number(session.remainingMs) || 0), actualSeconds: Math.max(0, Number(session.actualSeconds) || 0), completedAt: session.completedAt || null, updatedAt: session.updatedAt || isoNow() }));
+      const reviewResult = await prepareVersioned(snapshot.reviews, reviewMap, (review) => ({ id: review.id, periodType: ["daily", "weekly", "monthly"].includes(review.periodType) ? review.periodType : "daily", periodStart: review.periodStart || "", periodEnd: review.periodEnd || review.periodStart || "", answers: review.answers && typeof review.answers === "object" ? review.answers : {}, freeform: String(review.freeform || ""), metrics: review.metrics && typeof review.metrics === "object" ? review.metrics : { completedTasks: 0, completedSchedules: 0, focusSessions: 0, focusMinutes: 0 }, createdAt: review.createdAt || isoNow(), updatedAt: review.updatedAt || isoNow() }));
+      const goalResult = await prepareVersioned(snapshot.goals, goalMap, (goal) => ({ id: goal.id, title: String(goal.title || "未命名目标"), description: String(goal.description || ""), startDate: goal.startDate || "", dueDate: goal.dueDate || "", color: goal.color || "#4f7df3", status: ["active", "paused", "completed", "archived"].includes(goal.status) ? goal.status : "active", progressMode: goal.progressMode === "manual" ? "manual" : "automatic", manualProgress: Math.min(100, Math.max(0, Number(goal.manualProgress) || 0)), createdAt: goal.createdAt || isoNow(), updatedAt: goal.updatedAt || isoNow(), deletedAt: goal.deletedAt || null }));
+      const milestoneResult = await prepareVersioned(snapshot.milestones, milestoneMap, (milestone) => ({ id: milestone.id, goalId: milestone.goalId || "", title: String(milestone.title || "未命名里程碑"), dueDate: milestone.dueDate || "", weight: Math.max(1, Number(milestone.weight) || 1), taskIds: Array.isArray(milestone.taskIds) ? [...new Set(milestone.taskIds)] : [], completed: Boolean(milestone.completed), createdAt: milestone.createdAt || isoNow(), updatedAt: milestone.updatedAt || isoNow(), deletedAt: milestone.deletedAt || null }));
       const changedScheduleCount = scheduleResult.changed.length + scheduleSeriesResult.changed.length + scheduleOccurrenceResult.changed.length + scheduleDailyNoteResult.changed.length;
       const operation = { id: makeId("op"), state: "pending", reason, createdAt: isoNow(), noteIds: changedNotes.map((item) => item.id), taskIds: taskResult.changed.map((item) => item.id), scheduleIds: scheduleResult.changed.map((item) => item.id), scheduleSeriesIds: scheduleSeriesResult.changed.map((item) => item.id), scheduleOccurrenceIds: scheduleOccurrenceResult.changed.map((item) => item.id), scheduleDailyNoteIds: scheduleDailyNoteResult.changed.map((item) => item.id), whiteboardIds: whiteboardResult.changed.map((item) => item.id) };
       await this.put(STORES.operations, operation);
       try {
-        const transaction = this.db.transaction([STORES.notes, STORES.folders, STORES.files, STORES.tasks, STORES.taskFields, STORES.taskViews, STORES.scheduleEntries, STORES.scheduleSeries, STORES.scheduleOccurrenceStates, STORES.scheduleDailyNotes, STORES.whiteboards, STORES.operations, STORES.meta], "readwrite");
+        const transaction = this.db.transaction([STORES.notes, STORES.folders, STORES.files, STORES.tasks, STORES.taskFields, STORES.taskViews, STORES.scheduleEntries, STORES.scheduleSeries, STORES.scheduleOccurrenceStates, STORES.scheduleDailyNotes, STORES.whiteboards, STORES.focusSessions, STORES.reviews, STORES.goals, STORES.milestones, STORES.operations, STORES.meta], "readwrite");
         const notesStore = transaction.objectStore(STORES.notes), foldersStore = transaction.objectStore(STORES.folders), filesStore = transaction.objectStore(STORES.files);
-        const tasksStore = transaction.objectStore(STORES.tasks), taskFieldsStore = transaction.objectStore(STORES.taskFields), taskViewsStore = transaction.objectStore(STORES.taskViews), scheduleStore = transaction.objectStore(STORES.scheduleEntries), scheduleSeriesStore = transaction.objectStore(STORES.scheduleSeries), scheduleOccurrenceStore = transaction.objectStore(STORES.scheduleOccurrenceStates), scheduleDailyNoteStore = transaction.objectStore(STORES.scheduleDailyNotes), whiteboardStore = transaction.objectStore(STORES.whiteboards);
+        const tasksStore = transaction.objectStore(STORES.tasks), taskFieldsStore = transaction.objectStore(STORES.taskFields), taskViewsStore = transaction.objectStore(STORES.taskViews), scheduleStore = transaction.objectStore(STORES.scheduleEntries), scheduleSeriesStore = transaction.objectStore(STORES.scheduleSeries), scheduleOccurrenceStore = transaction.objectStore(STORES.scheduleOccurrenceStates), scheduleDailyNoteStore = transaction.objectStore(STORES.scheduleDailyNotes), whiteboardStore = transaction.objectStore(STORES.whiteboards), focusStore = transaction.objectStore(STORES.focusSessions), reviewStore = transaction.objectStore(STORES.reviews), goalStore = transaction.objectStore(STORES.goals), milestoneStore = transaction.objectStore(STORES.milestones);
         const nextNoteIds = new Set(preparedNotes.map((item) => item.id));
         const nextFolderIds = new Set(preparedFolders.map((item) => item.id));
         const nextFileIds = new Set(preparedFiles.map((item) => item.id));
@@ -454,6 +526,10 @@
         const nextScheduleOccurrenceIds = new Set(scheduleOccurrenceResult.prepared.map((item) => item.id));
         const nextScheduleDailyNoteIds = new Set(scheduleDailyNoteResult.prepared.map((item) => item.id));
         const nextWhiteboardIds = new Set(whiteboardResult.prepared.map((item) => item.id));
+        const nextFocusIds = new Set(focusResult.prepared.map((item) => item.id));
+        const nextReviewIds = new Set(reviewResult.prepared.map((item) => item.id));
+        const nextGoalIds = new Set(goalResult.prepared.map((item) => item.id));
+        const nextMilestoneIds = new Set(milestoneResult.prepared.map((item) => item.id));
         preparedNotes.forEach((item) => { if (!noteMap.has(item.id) || noteMap.get(item.id).checksum !== item.checksum) notesStore.put(item); });
         preparedFolders.forEach((item) => { if (!folderMap.has(item.id) || folderMap.get(item.id).checksum !== item.checksum) foldersStore.put(item); });
         preparedFiles.forEach((item) => { if (!fileMap.has(item.id) || fileMap.get(item.id).checksum !== item.checksum) filesStore.put(item); });
@@ -465,6 +541,10 @@
         scheduleOccurrenceResult.prepared.forEach((item) => { if (scheduleOccurrenceMap.get(item.id)?.checksum !== item.checksum) scheduleOccurrenceStore.put(item); });
         scheduleDailyNoteResult.prepared.forEach((item) => { if (scheduleDailyNoteMap.get(item.id)?.checksum !== item.checksum) scheduleDailyNoteStore.put(item); });
         whiteboardResult.prepared.forEach((item) => { if (whiteboardMap.get(item.id)?.checksum !== item.checksum) whiteboardStore.put(item); });
+        focusResult.prepared.forEach((item) => { if (focusSessionMap.get(item.id)?.checksum !== item.checksum) focusStore.put(item); });
+        reviewResult.prepared.forEach((item) => { if (reviewMap.get(item.id)?.checksum !== item.checksum) reviewStore.put(item); });
+        goalResult.prepared.forEach((item) => { if (goalMap.get(item.id)?.checksum !== item.checksum) goalStore.put(item); });
+        milestoneResult.prepared.forEach((item) => { if (milestoneMap.get(item.id)?.checksum !== item.checksum) milestoneStore.put(item); });
         existingNotes.forEach((item) => { if (!nextNoteIds.has(item.id)) notesStore.delete(item.id); });
         existingFolders.forEach((item) => { if (!nextFolderIds.has(item.id)) foldersStore.delete(item.id); });
         existingFiles.forEach((item) => { if (!nextFileIds.has(item.id)) filesStore.delete(item.id); });
@@ -476,17 +556,21 @@
         existingScheduleOccurrenceStates.forEach((item) => { if (!nextScheduleOccurrenceIds.has(item.id)) scheduleOccurrenceStore.delete(item.id); });
         existingScheduleDailyNotes.forEach((item) => { if (!nextScheduleDailyNoteIds.has(item.id)) scheduleDailyNoteStore.delete(item.id); });
         existingWhiteboards.forEach((item) => { if (!nextWhiteboardIds.has(item.id)) whiteboardStore.delete(item.id); });
+        existingFocusSessions.forEach((item) => { if (!nextFocusIds.has(item.id)) focusStore.delete(item.id); });
+        existingReviews.forEach((item) => { if (!nextReviewIds.has(item.id)) reviewStore.delete(item.id); });
+        existingGoals.forEach((item) => { if (!nextGoalIds.has(item.id)) goalStore.delete(item.id); });
+        existingMilestones.forEach((item) => { if (!nextMilestoneIds.has(item.id)) milestoneStore.delete(item.id); });
         const committedAt = isoNow();
         transaction.objectStore(STORES.operations).put({ ...operation, state: "committed", committedAt });
-        transaction.objectStore(STORES.meta).put({ key: "lastCommit", id: operation.id, committedAt, reason, changedNotes: changedNotes.length, changedTasks: taskResult.changed.length, changedTaskFields: fieldResult.changed.length, changedSchedules: changedScheduleCount, changedWhiteboards: whiteboardResult.changed.length });
+        transaction.objectStore(STORES.meta).put({ key: "lastCommit", id: operation.id, committedAt, reason, changedNotes: changedNotes.length, changedTasks: taskResult.changed.length, changedTaskFields: fieldResult.changed.length, changedSchedules: changedScheduleCount, changedWhiteboards: whiteboardResult.changed.length, changedFocusSessions: focusResult.changed.length, changedReviews: reviewResult.changed.length, changedGoals: goalResult.changed.length, changedMilestones: milestoneResult.changed.length });
         transaction.objectStore(STORES.meta).put({ key: "backupDirty", value: true, commitId: operation.id, updatedAt: committedAt });
         await transactionDone(transaction);
         for (const expected of changedNotes) {
           const actual = await this.get(STORES.notes, expected.id);
           if (!actual || actual.revision !== expected.revision || actual.checksum !== expected.checksum) throw new Error(`笔记“${expected.title || "无标题"}”回读校验失败`);
         }
-        for (const expected of [...taskResult.changed, ...fieldResult.changed, ...viewResult.changed, ...scheduleResult.changed, ...scheduleSeriesResult.changed, ...scheduleOccurrenceResult.changed, ...scheduleDailyNoteResult.changed, ...whiteboardResult.changed]) {
-          const store = taskResult.changed.includes(expected) ? STORES.tasks : fieldResult.changed.includes(expected) ? STORES.taskFields : viewResult.changed.includes(expected) ? STORES.taskViews : scheduleResult.changed.includes(expected) ? STORES.scheduleEntries : scheduleSeriesResult.changed.includes(expected) ? STORES.scheduleSeries : scheduleOccurrenceResult.changed.includes(expected) ? STORES.scheduleOccurrenceStates : scheduleDailyNoteResult.changed.includes(expected) ? STORES.scheduleDailyNotes : STORES.whiteboards;
+        for (const expected of [...taskResult.changed, ...fieldResult.changed, ...viewResult.changed, ...scheduleResult.changed, ...scheduleSeriesResult.changed, ...scheduleOccurrenceResult.changed, ...scheduleDailyNoteResult.changed, ...whiteboardResult.changed, ...focusResult.changed, ...reviewResult.changed, ...goalResult.changed, ...milestoneResult.changed]) {
+          const store = taskResult.changed.includes(expected) ? STORES.tasks : fieldResult.changed.includes(expected) ? STORES.taskFields : viewResult.changed.includes(expected) ? STORES.taskViews : scheduleResult.changed.includes(expected) ? STORES.scheduleEntries : scheduleSeriesResult.changed.includes(expected) ? STORES.scheduleSeries : scheduleOccurrenceResult.changed.includes(expected) ? STORES.scheduleOccurrenceStates : scheduleDailyNoteResult.changed.includes(expected) ? STORES.scheduleDailyNotes : whiteboardResult.changed.includes(expected) ? STORES.whiteboards : focusResult.changed.includes(expected) ? STORES.focusSessions : reviewResult.changed.includes(expected) ? STORES.reviews : goalResult.changed.includes(expected) ? STORES.goals : STORES.milestones;
           const actual = await this.get(store, expected.id);
           if (!actual || actual.revision !== expected.revision || actual.checksum !== expected.checksum) throw new Error(`结构化数据“${expected.name || expected.title || expected.id}”回读校验失败`);
         }
@@ -509,10 +593,14 @@
         (inputState.scheduleDailyNotes || []).forEach((dailyNote) => { const saved = savedScheduleDailyNotes.get(dailyNote.id); if (saved) { dailyNote.revision = saved.revision; dailyNote.checksum = saved.checksum; } });
         const savedWhiteboards = new Map(whiteboardResult.prepared.map((item) => [item.id, item]));
         (inputState.whiteboards || []).forEach((board) => { const saved = savedWhiteboards.get(board.id); if (saved) { board.revision = saved.revision; board.checksum = saved.checksum; } });
+        for (const [items, result] of [[inputState.focusSessions, focusResult], [inputState.reviews, reviewResult], [inputState.goals, goalResult], [inputState.milestones, milestoneResult]]) {
+          const savedRecords = new Map(result.prepared.map((item) => [item.id, item]));
+          (items || []).forEach((item) => { const saved = savedRecords.get(item.id); if (saved) { item.revision = saved.revision; item.checksum = saved.checksum; } });
+        }
         await this.maybeCreateHistory(changedNotes, reason);
         await this.maybeCreateTaskHistory(taskResult.changed, fieldResult.changed, reason);
         this.lastError = null;
-        return { committedAt, operationId: operation.id, changedNotes: changedNotes.length, changedTasks: taskResult.changed.length, changedSchedules: changedScheduleCount, changedWhiteboards: whiteboardResult.changed.length };
+        return { committedAt, operationId: operation.id, changedNotes: changedNotes.length, changedTasks: taskResult.changed.length, changedSchedules: changedScheduleCount, changedWhiteboards: whiteboardResult.changed.length, changedFocusSessions: focusResult.changed.length, changedReviews: reviewResult.changed.length, changedGoals: goalResult.changed.length, changedMilestones: milestoneResult.changed.length };
       } catch (error) {
         operation.state = "failed"; operation.failedAt = isoNow(); operation.error = String(error?.message || error);
         try { await this.put(STORES.operations, operation); } catch { /* preserve the original failure */ }
@@ -689,16 +777,16 @@
     }
 
     async buildBackupSnapshot() {
-      const [notes, folders, files, tasks, taskFields, taskViews, scheduleEntries, scheduleSeries, scheduleOccurrenceStates, scheduleDailyNotes, whiteboards, noteHistory, taskHistory, recovery, attachments, lastCommit] = await Promise.all([
+      const [notes, folders, files, tasks, taskFields, taskViews, scheduleEntries, scheduleSeries, scheduleOccurrenceStates, scheduleDailyNotes, whiteboards, focusSessions, reviews, goals, milestones, noteHistory, taskHistory, recovery, attachments, lastCommit] = await Promise.all([
         this.getAll(STORES.notes), this.getAll(STORES.folders), this.getAll(STORES.files),
         this.getAll(STORES.tasks), this.getAll(STORES.taskFields), this.getAll(STORES.taskViews),
-        this.getAll(STORES.scheduleEntries), this.getAll(STORES.scheduleSeries), this.getAll(STORES.scheduleOccurrenceStates), this.getAll(STORES.scheduleDailyNotes), this.getAll(STORES.whiteboards),
+        this.getAll(STORES.scheduleEntries), this.getAll(STORES.scheduleSeries), this.getAll(STORES.scheduleOccurrenceStates), this.getAll(STORES.scheduleDailyNotes), this.getAll(STORES.whiteboards), this.getAll(STORES.focusSessions), this.getAll(STORES.reviews), this.getAll(STORES.goals), this.getAll(STORES.milestones),
         this.getAll(STORES.history), this.getAll(STORES.taskHistory), this.getAll(STORES.recovery),
         this.getAll(STORES.attachments), this.get(STORES.meta, "lastCommit")
       ]);
       return {
         format: "easynote-directory-backup", version: 6, createdAt: isoNow(), commit: lastCommit || null,
-        data: { notes, categories: folders, files, tasks, taskFields, taskViews, scheduleEntries, scheduleSeries, scheduleOccurrenceStates, scheduleDailyNotes, whiteboards, noteHistory, taskHistory, recovery },
+        data: { notes, categories: folders, files, tasks, taskFields, taskViews, scheduleEntries, scheduleSeries, scheduleOccurrenceStates, scheduleDailyNotes, whiteboards, focusSessions, reviews, goals, milestones, noteHistory, taskHistory, recovery },
         attachments: attachments.map(({ blob, ...item }) => ({ ...item, file: `${item.sha256}.${mimeExtension(item.type)}` }))
       };
     }
@@ -842,12 +930,12 @@
     async integrityCheck({ full = false } = {}) {
       const report = { checkedAt: isoNow(), full, ok: true, errors: [], warnings: [], counts: {} };
       try {
-        const [notes, folders, files, tasks, taskFields, taskViews, scheduleEntries, scheduleSeries, scheduleOccurrenceStates, scheduleDailyNotes, whiteboards, attachments, operations] = await Promise.all([
+        const [notes, folders, files, tasks, taskFields, taskViews, scheduleEntries, scheduleSeries, scheduleOccurrenceStates, scheduleDailyNotes, whiteboards, focusSessions, reviews, goals, milestones, attachments, operations] = await Promise.all([
           this.getAll(STORES.notes), this.getAll(STORES.folders), this.getAll(STORES.files),
           this.getAll(STORES.tasks), this.getAll(STORES.taskFields), this.getAll(STORES.taskViews),
-          this.getAll(STORES.scheduleEntries), this.getAll(STORES.scheduleSeries), this.getAll(STORES.scheduleOccurrenceStates), this.getAll(STORES.scheduleDailyNotes), this.getAll(STORES.whiteboards), this.getAll(STORES.attachments), this.getAll(STORES.operations)
+          this.getAll(STORES.scheduleEntries), this.getAll(STORES.scheduleSeries), this.getAll(STORES.scheduleOccurrenceStates), this.getAll(STORES.scheduleDailyNotes), this.getAll(STORES.whiteboards), this.getAll(STORES.focusSessions), this.getAll(STORES.reviews), this.getAll(STORES.goals), this.getAll(STORES.milestones), this.getAll(STORES.attachments), this.getAll(STORES.operations)
         ]);
-        report.counts = { notes: notes.length, folders: folders.length, files: files.length, tasks: tasks.length, taskFields: taskFields.length, schedules: scheduleEntries.length, scheduleSeries: scheduleSeries.length, scheduleOccurrenceStates: scheduleOccurrenceStates.length, scheduleDailyNotes: scheduleDailyNotes.length, whiteboards: whiteboards.length, attachments: attachments.length };
+        report.counts = { notes: notes.length, folders: folders.length, files: files.length, tasks: tasks.length, taskFields: taskFields.length, schedules: scheduleEntries.length, scheduleSeries: scheduleSeries.length, scheduleOccurrenceStates: scheduleOccurrenceStates.length, scheduleDailyNotes: scheduleDailyNotes.length, whiteboards: whiteboards.length, focusSessions: focusSessions.length, reviews: reviews.length, goals: goals.length, milestones: milestones.length, attachments: attachments.length };
         const folderIds = new Set(folders.map((item) => item.id));
         const attachmentIds = new Set(attachments.map((item) => item.id));
         const noteIds = new Set(notes.map((item) => item.id));
@@ -905,10 +993,11 @@
         const scheduleTemplateIds = new Set(scheduleEntries.filter((entry) => entry.isTemplate).map((entry) => entry.id));
         for (const entry of scheduleEntries) {
           const legacy = { id: entry.id, title: entry.title || "未命名日程", date: entry.date || "", allDay: entry.allDay !== false, startTime: entry.allDay === false ? entry.startTime || "" : "", endTime: entry.allDay === false ? entry.endTime || "" : "", notes: entry.notes || "", color: entry.color || "#4f7df3", completed: Boolean(entry.completed), taskId: entry.taskId || "", createdAt: entry.createdAt, updatedAt: entry.updatedAt };
-          const reminderClean = { ...legacy, reminderMode: ["auto", "none", "custom"].includes(entry.reminderMode) ? entry.reminderMode : "auto", customReminderAt: entry.reminderMode === "custom" ? entry.customReminderAt || "" : "" };
+          const linkedClean = { ...legacy, noteId: entry.noteId || "", url: entry.url || "", urlLabel: entry.urlLabel || "" };
+          const reminderClean = { ...linkedClean, reminderMode: ["auto", "none", "custom"].includes(entry.reminderMode) ? entry.reminderMode : "auto", customReminderAt: entry.reminderMode === "custom" ? entry.customReminderAt || "" : "" };
           const clean = { ...reminderClean, isTemplate: Boolean(entry.isTemplate), seriesId: entry.seriesId || "", recurrenceType: ["daily", "weekdays", "weekly", "monthly"].includes(entry.recurrenceType) ? entry.recurrenceType : "none", recurrenceInterval: Math.max(1, Number(entry.recurrenceInterval) || 1), repeatUntil: entry.repeatUntil || "", excludedDates: Array.isArray(entry.excludedDates) ? [...new Set(entry.excludedDates)].sort() : [] };
-          const currentHash = await sha256(stableStringify(clean)), reminderHash = await sha256(stableStringify(reminderClean)), legacyHash = await sha256(stableStringify(legacy));
-          if (currentHash !== entry.checksum && reminderHash !== entry.checksum && legacyHash !== entry.checksum) report.errors.push(`日程“${entry.title || entry.id}”校验值不一致`);
+          const currentHash = await sha256(stableStringify(clean)), reminderHash = await sha256(stableStringify(reminderClean)), linkedHash = await sha256(stableStringify(linkedClean)), legacyHash = await sha256(stableStringify(legacy));
+          if (currentHash !== entry.checksum && reminderHash !== entry.checksum && linkedHash !== entry.checksum && legacyHash !== entry.checksum) report.errors.push(`日程“${entry.title || entry.id}”校验值不一致`);
           if (!/^\d{4}-\d{2}-\d{2}$/.test(clean.date) || Number.isNaN(new Date(`${clean.date}T12:00:00`).getTime())) report.errors.push(`日程“${entry.title || entry.id}”日期无效`);
           if (!clean.allDay && !/^\d{2}:\d{2}$/.test(clean.startTime)) report.errors.push(`日程“${entry.title || entry.id}”缺少有效开始时间`);
           if (!clean.allDay && clean.endTime && (!/^\d{2}:\d{2}$/.test(clean.endTime) || clean.endTime <= clean.startTime)) report.errors.push(`日程“${entry.title || entry.id}”结束时间无效`);
@@ -920,8 +1009,9 @@
         }
         const seriesIds = new Set(scheduleSeries.map((series) => series.id));
         for (const series of scheduleSeries) {
-          const clean = { id: series.id, title: series.title || "未命名固定日程", startDate: series.startDate || "", allDay: series.allDay !== false, startTime: series.allDay === false ? series.startTime || "" : "", endTime: series.allDay === false ? series.endTime || "" : "", notes: series.notes || "", color: series.color || "#4f7df3", taskId: series.taskId || "", reminderMode: series.reminderMode === "none" ? "none" : "auto", recurrenceType: ["daily", "weekdays", "weekly", "monthly"].includes(series.recurrenceType) ? series.recurrenceType : "daily", recurrenceInterval: Math.max(1, Number(series.recurrenceInterval) || 1), weekdays: Array.isArray(series.weekdays) ? [...new Set(series.weekdays.map(Number).filter((day) => day >= 0 && day <= 6))].sort() : [], dayOfMonth: Math.min(31, Math.max(1, Number(series.dayOfMonth) || 1)), until: series.until || "", active: series.active !== false, createdAt: series.createdAt, updatedAt: series.updatedAt };
-          if (await sha256(stableStringify(clean)) !== series.checksum) report.errors.push(`固定日程“${clean.title}”校验值不一致`);
+          const legacySeries = { id: series.id, title: series.title || "未命名固定日程", startDate: series.startDate || "", allDay: series.allDay !== false, startTime: series.allDay === false ? series.startTime || "" : "", endTime: series.allDay === false ? series.endTime || "" : "", notes: series.notes || "", color: series.color || "#4f7df3", taskId: series.taskId || "", reminderMode: series.reminderMode === "none" ? "none" : "auto", recurrenceType: ["daily", "weekdays", "weekly", "monthly"].includes(series.recurrenceType) ? series.recurrenceType : "daily", recurrenceInterval: Math.max(1, Number(series.recurrenceInterval) || 1), weekdays: Array.isArray(series.weekdays) ? [...new Set(series.weekdays.map(Number).filter((day) => day >= 0 && day <= 6))].sort() : [], dayOfMonth: Math.min(31, Math.max(1, Number(series.dayOfMonth) || 1)), until: series.until || "", active: series.active !== false, createdAt: series.createdAt, updatedAt: series.updatedAt };
+          const clean = { ...legacySeries, noteId: series.noteId || "", url: series.url || "", urlLabel: series.urlLabel || "" };
+          if (await sha256(stableStringify(clean)) !== series.checksum && await sha256(stableStringify(legacySeries)) !== series.checksum) report.errors.push(`固定日程“${clean.title}”校验值不一致`);
           if (!/^\d{4}-\d{2}-\d{2}$/.test(clean.startDate)) report.errors.push(`固定日程“${clean.title}”开始日期无效`);
           if (clean.until && clean.until < clean.startDate) report.errors.push(`固定日程“${clean.title}”结束日期无效`);
           if (!clean.allDay && (!/^\d{2}:\d{2}$/.test(clean.startTime) || clean.endTime && clean.endTime <= clean.startTime)) report.errors.push(`固定日程“${clean.title}”时间范围无效`);
@@ -937,6 +1027,26 @@
           const clean = { id: dailyNote.id || dailyNote.date, date: dailyNote.date || dailyNote.id || "", content: String(dailyNote.content || ""), updatedAt: dailyNote.updatedAt };
           if (await sha256(stableStringify(clean)) !== dailyNote.checksum) report.errors.push(`日程便签“${clean.date}”校验值不一致`);
           if (!/^\d{4}-\d{2}-\d{2}$/.test(clean.date)) report.errors.push(`日程便签“${clean.id}”日期无效`);
+        }
+        const verifyExtension = async (record, label) => {
+          const { checksum, revision, ...clean } = record;
+          if (await sha256(stableStringify(clean)) !== checksum) report.errors.push(`${label}“${record.title || record.label || record.id}”校验值不一致`);
+        };
+        for (const session of focusSessions) {
+          await verifyExtension(session, "专注记录");
+          if (session.taskId && !taskIds.has(session.taskId)) report.warnings.push(`专注记录“${session.label}”关联任务不存在`);
+          if (!['active','paused','completed','abandoned'].includes(session.status)) report.errors.push(`专注记录“${session.label}”状态无效`);
+        }
+        for (const review of reviews) {
+          await verifyExtension(review, "复盘");
+          if (!['daily','weekly','monthly'].includes(review.periodType) || !/^\d{4}-\d{2}-\d{2}$/.test(review.periodStart)) report.errors.push(`复盘“${review.id}”周期无效`);
+        }
+        const goalIds = new Set(goals.filter((goal) => !goal.deletedAt).map((goal) => goal.id));
+        for (const goal of goals) await verifyExtension(goal, "长期目标");
+        for (const milestone of milestones) {
+          await verifyExtension(milestone, "里程碑");
+          if (!milestone.deletedAt && !goalIds.has(milestone.goalId)) report.warnings.push(`里程碑“${milestone.title}”关联目标不存在`);
+          for (const taskId of milestone.taskIds || []) if (!taskIds.has(taskId)) report.warnings.push(`里程碑“${milestone.title}”关联任务不存在`);
         }
         for (const board of whiteboards) {
           const clean = this.whiteboardPayload(board);

@@ -94,7 +94,7 @@
     installDialogs() {
       const root = document.createElement("div");
       root.innerHTML = `<div class="task-modal-backdrop" id="taskModalBackdrop" hidden><section class="task-modal" id="taskModal" role="dialog" aria-modal="true"></section></div>
-        <aside class="task-detail-drawer" id="taskDetailDrawer" hidden><header><div><span>任务详情</span><strong id="taskDetailTitle">任务</strong></div><button data-task-drawer-close aria-label="关闭">×</button></header><div class="task-detail-scroll" id="taskDetailBody"></div><footer><button class="danger-button" data-task-delete>删除任务</button><div><button class="secondary-button" data-task-schedule>安排到日程</button><button class="secondary-button" data-task-drawer-close>关闭</button></div></footer></aside>`;
+        <aside class="task-detail-drawer" id="taskDetailDrawer" hidden><header><div><span>任务详情</span><strong id="taskDetailTitle">任务</strong></div><button data-task-drawer-close aria-label="关闭">×</button></header><div class="task-detail-scroll" id="taskDetailBody"></div><footer><button class="danger-button" data-task-delete>删除任务</button><div><button class="secondary-button" data-task-focus>开始专注</button><button class="secondary-button" data-task-schedule>安排到日程</button><button class="secondary-button" data-task-drawer-close>关闭</button></div></footer></aside>`;
       document.body.append(...root.children);
       this.modalBackdrop = document.querySelector("#taskModalBackdrop");
       this.modal = document.querySelector("#taskModal");
@@ -499,6 +499,7 @@
       this.modal.className = "task-modal task-fields-modal";
       this.modal.innerHTML = `<header><div><span>任务管理</span><h2>自定义字段</h2></div><button data-task-modal-close>×</button></header><div class="task-fields-layout"><nav class="task-field-list">${this.fields.map((field, index) => `<button class="${field.id === editId ? "active" : ""}" data-field-select="${field.id}"><i>${esc(TYPE_LABELS[field.type])}</i><span>${esc(field.name)}</span>${field.hidden ? "<em>已隐藏</em>" : ""}<b><span data-field-up="${field.id}" ${index === 0 ? "hidden" : ""}>↑</span><span data-field-down="${field.id}" ${index === this.fields.length - 1 ? "hidden" : ""}>↓</span></b></button>`).join("")}<button class="task-new-field" data-field-new>＋ 新增字段</button></nav><div class="task-field-form" id="taskFieldForm">${editId ? this.fieldForm(this.field(editId)) : `<div class="task-field-welcome"><strong>管理任务字段</strong><p>选择左侧字段修改名称、类型与显示方式，或新增一个字段。</p></div>`}</div></div><footer><button class="secondary-button" data-task-modal-close>完成</button></footer>`;
       this.modalBackdrop.hidden = false;
+      this.updateFieldConfigVisibility(this.modal.querySelector("[data-field-form]"));
     }
 
     fieldForm(field, isNew = false) {
@@ -509,9 +510,10 @@
         <label><span>字段说明</span><input name="description" value="${attr(current.description || "")}" placeholder="可选，说明该字段的用途"></label>
         <div class="task-form-grid"><label><span>列宽（像素）</span><input type="number" name="width" min="90" max="520" value="${current.width || 160}"></label><label><span>系统角色</span><select name="systemRole" ${current.systemRole === "title" ? "disabled" : ""}><option value="">普通字段</option><option value="status" ${current.systemRole === "status" ? "selected" : ""}>状态联动</option><option value="progress" ${current.systemRole === "progress" ? "selected" : ""}>进度联动</option></select></label></div>
         <div class="task-field-checks"><label><input type="checkbox" name="required" ${current.required ? "checked" : ""}> 必填</label><label><input type="checkbox" name="hidden" ${current.hidden ? "checked" : ""}> 在表格中隐藏</label><label><input type="checkbox" name="multiline" ${current.config?.multiline ? "checked" : ""}> 多行文本</label><label><input type="checkbox" name="includeTime" ${current.config?.includeTime ? "checked" : ""}> 包含时间</label><label><input type="checkbox" name="percent" ${current.config?.format === "percent" ? "checked" : ""}> 百分比进度条</label></div>
-        <div class="task-form-grid task-number-config ${current.type === "number" ? "" : "task-config-hidden"}"><label><span>最小值</span><input type="number" name="min" value="${current.config?.min ?? 0}"></label><label><span>最大值</span><input type="number" name="max" value="${current.config?.max ?? 100}"></label><label><span>步长</span><input type="number" name="step" min="0.01" value="${current.config?.step ?? 1}"></label></div>
+        <div class="task-form-grid task-number-config ${current.type === "number" ? "" : "task-config-hidden"}"><label><span>最小值</span><input type="number" name="min" value="${current.config?.min ?? 0}" ${current.type === "number" ? "" : "disabled"}></label><label><span>最大值</span><input type="number" name="max" value="${current.config?.max ?? 100}" ${current.type === "number" ? "" : "disabled"}></label><label><span>步长</span><input type="number" name="step" min="0.01" step="0.01" value="${current.config?.step ?? 1}" ${current.type === "number" ? "" : "disabled"}></label></div>
         <section class="task-progress-config ${current.type === "number" && current.config?.format === "percent" ? "" : "task-config-hidden"}"><strong>进度分段颜色</strong><div class="task-progress-color-grid">${(current.config?.progressColors || DEFAULT_PROGRESS_COLORS).map((color, index) => `<label><span>${["低进度", "进行中", "接近完成", "已完成"][index]}</span><input type="color" name="progressColor${index}" value="${attr(color)}"></label>`).join("")}</div><div class="task-form-grid task-progress-thresholds"><label><span>第二段起点</span><input type="number" name="progressThreshold0" min="1" max="98" value="${current.config?.progressThresholds?.[0] ?? 25}"></label><label><span>第三段起点</span><input type="number" name="progressThreshold1" min="2" max="99" value="${current.config?.progressThresholds?.[1] ?? 60}"></label><label><span>完成色起点</span><input type="number" name="progressThreshold2" min="3" max="100" value="${current.config?.progressThresholds?.[2] ?? 100}"></label></div></section>
         <label class="task-option-config"><span>选项（每行：名称 | 颜色${current.systemRole === "status" ? " | 完成/未完成" : ""}）</span><textarea name="options" rows="7" placeholder="待开始 | #64748b">${esc(optionsText)}</textarea><small>颜色可填写 #3976f6；状态字段至少需要一个完成和一个未完成选项。</small></label>
+        <p class="task-field-form-error" data-field-form-error role="alert" hidden></p>
         <div class="task-field-form-actions">${!isNew && current.systemRole !== "title" ? `<button type="button" class="danger-button" data-delete-field="${current.id}">删除字段</button>` : ""}<button type="submit" class="primary-button">保存字段</button></div>
       </form>`;
     }
@@ -550,13 +552,14 @@
 
     async saveField(form) {
       const next = this.parseFieldForm(form), old = this.field(next.id), isNew = !old;
-      if (!next.name) return this.toast("字段名称不能为空");
-      if (next.systemRole === "status" && next.type !== "singleSelect") return this.toast("状态角色只能绑定单选字段");
-      if (next.systemRole === "progress" && (next.type !== "number" || next.config.format !== "percent")) return this.toast("进度角色只能绑定百分比数字字段");
-      if (next.systemRole === "status" && (!next.options.some((option) => option.isDone) || !next.options.some((option) => !option.isDone))) return this.toast("状态字段至少需要一个完成选项和一个未完成选项");
+      const reject = (message) => { this.showFieldFormError(form, message); this.toast(message); return false; };
+      if (!next.name) return reject("字段名称不能为空");
+      if (next.systemRole === "status" && next.type !== "singleSelect") return reject("状态角色只能绑定单选字段");
+      if (next.systemRole === "progress" && (next.type !== "number" || next.config.format !== "percent")) return reject("进度角色只能绑定百分比数字字段");
+      if (next.systemRole === "status" && (!next.options.some((option) => option.isDone) || !next.options.some((option) => !option.isDone))) return reject("状态字段至少需要一个完成选项和一个未完成选项");
       if (old?.systemRole === "title") { next.type = "text"; next.systemRole = "title"; }
-      if (old?.systemRole && old.systemRole !== "title" && next.systemRole !== old.systemRole && !this.state.taskFields.some((field) => field.id !== old.id && field.systemRole === old.systemRole)) return this.toast(`请先把“${old.systemRole === "status" ? "状态" : "进度"}”角色转交给另一个兼容字段，再修改此字段`);
-      const conversion = this.canConvert(old, next.type); if (!conversion.ok) return this.toast(conversion.message);
+      if (old?.systemRole && old.systemRole !== "title" && next.systemRole !== old.systemRole && !this.state.taskFields.some((field) => field.id !== old.id && field.systemRole === old.systemRole)) return reject(`请先把“${old.systemRole === "status" ? "状态" : "进度"}”角色转交给另一个兼容字段，再修改此字段`);
+      const conversion = this.canConvert(old, next.type); if (!conversion.ok) return reject(conversion.message);
       const snapshot = { field: clone(old || next), values: this.state.tasks.map((task) => ({ taskId: task.id, value: clone(task.values[next.id]) })) };
       await this.safety.recordRecovery("task-field-change", `修改字段“${next.name}”前`, snapshot);
       if (old && ["singleSelect", "multiSelect"].includes(old.type) && ["singleSelect", "multiSelect"].includes(next.type)) {
@@ -825,6 +828,7 @@
       this.modalBackdrop.addEventListener("click", (event) => { if (event.target === this.modalBackdrop || event.target.closest("[data-task-modal-close]")) this.closeModal(); });
       this.modal.addEventListener("click", (event) => this.handleModalClick(event));
       this.modal.addEventListener("change", (event) => { const form = event.target.closest("[data-field-form]"); if (form && ["type", "percent"].includes(event.target.name)) this.updateFieldConfigVisibility(form); });
+      this.modal.addEventListener("invalid", (event) => { const form = event.target.closest("[data-field-form]"); if (form) this.showFieldFormError(form, event.target.validationMessage || "请检查字段设置"); }, true);
       this.modal.addEventListener("submit", (event) => this.handleModalSubmit(event));
       this.drawer.addEventListener("click", (event) => this.handleDrawerClick(event));
       this.drawer.addEventListener("change", (event) => this.handleDrawerChange(event));
@@ -851,7 +855,14 @@
       if (cell && !event.target.closest("button,a,input,select,textarea")) this.startCellEdit(cell);
     }
 
-    showNewFieldForm() { const target = this.modal.querySelector("#taskFieldForm"); if (target) target.innerHTML = this.fieldForm(null, true); }
+    showNewFieldForm() { const target = this.modal.querySelector("#taskFieldForm"); if (target) { target.innerHTML = this.fieldForm(null, true); this.updateFieldConfigVisibility(target.querySelector("[data-field-form]")); } }
+
+    showFieldFormError(form, message = "") {
+      const target = form?.querySelector?.("[data-field-form-error]");
+      if (!target) return;
+      target.textContent = message;
+      target.hidden = !message;
+    }
 
     handleModalClick(event) {
       const select = event.target.closest("[data-field-select]"); if (select) return this.openFieldManager(select.dataset.fieldSelect);
@@ -867,6 +878,9 @@
       const isNumber = form?.elements?.type?.value === "number", isPercent = isNumber && form.elements.percent.checked;
       form?.querySelector(".task-number-config")?.classList.toggle("task-config-hidden", !isNumber);
       form?.querySelector(".task-progress-config")?.classList.toggle("task-config-hidden", !isPercent);
+      form?.querySelectorAll(".task-number-config input").forEach((input) => { input.disabled = !isNumber; });
+      form?.querySelectorAll(".task-progress-config input").forEach((input) => { input.disabled = !isPercent; });
+      this.showFieldFormError(form, "");
     }
 
     handleModalSubmit(event) {
@@ -879,6 +893,7 @@
     handleDrawerClick(event) {
       if (event.target.closest("[data-task-drawer-close]")) return this.closeDrawer();
       if (event.target.closest("[data-task-delete]")) return this.deleteTask(this.openTaskId);
+      if (event.target.closest("[data-task-focus]")) { const task = this.task(this.openTaskId); if (task) window.dispatchEvent(new CustomEvent("easynote:start-focus", { detail: { label: this.titleOf(task), taskId: task.id } })); return; }
       if (event.target.closest("[data-task-schedule]")) return this.options.scheduleTask?.(this.openTaskId);
       if (event.target.closest("[data-restore-task-history]")) return this.restoreTaskHistory(event.target.closest("[data-restore-task-history]").dataset.restoreTaskHistory);
       if (event.target.closest("[data-open-note]")) return this.options.openNote(event.target.closest("[data-open-note]").dataset.openNote);

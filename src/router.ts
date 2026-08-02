@@ -8,6 +8,10 @@ const routes: RouteRecordRaw[] = [
   { path: "/notes/edit", name: "note-edit", component: EmptyRoute },
   { path: "/tasks", name: "tasks", component: EmptyRoute },
   { path: "/schedule", name: "schedule", component: EmptyRoute },
+  { path: "/schedule/all", name: "schedule-all", component: EmptyRoute },
+  { path: "/schedule/series", name: "schedule-series", component: EmptyRoute },
+  { path: "/schedule/reviews", name: "schedule-reviews", component: EmptyRoute },
+  { path: "/schedule/goals", name: "schedule-goals", component: EmptyRoute },
   { path: "/whiteboards", name: "whiteboards", component: EmptyRoute },
   { path: "/:pathMatch(.*)*", redirect: "/notes" },
 ];

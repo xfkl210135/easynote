@@ -1,8 +1,8 @@
 // @ts-nocheck -- compatibility controller; new shell, routing, stores and data contracts are strict TypeScript.
 import { EasyNoteDataSafety } from "./data-safety";
 import { TaskManager } from "./task-manager";
-import { ScheduleManager } from "./schedule-manager";
 import { WhiteboardManager } from "./whiteboard-manager";
+import { installEasyNoteRuntime, VueScheduleAdapter } from "../services/legacy-runtime";
 
 "use strict";
 
@@ -104,7 +104,7 @@ import { WhiteboardManager } from "./whiteboard-manager";
         { id: "life", name: "生活", color: CATEGORY_COLORS[3] },
         { id: "ideas", name: "灵感", color: CATEGORY_COLORS[2] }
       ],
-      files: [], tasks: [], taskFields: [], taskViews: [], scheduleEntries: [], scheduleSeries: [], scheduleOccurrenceStates: [], scheduleDailyNotes: [], whiteboards: [],
+      files: [], tasks: [], taskFields: [], taskViews: [], scheduleEntries: [], scheduleSeries: [], scheduleOccurrenceStates: [], scheduleDailyNotes: [], focusSessions: [], reviews: [], goals: [], milestones: [], whiteboards: [],
       notes: [
         {
           id: uid(), title: "欢迎使用 EasyNote", categoryId: "ideas", tags: ["开始", "指南"], favorite: true,
@@ -136,6 +136,10 @@ import { WhiteboardManager } from "./whiteboard-manager";
     data.scheduleSeries = Array.isArray(data.scheduleSeries) ? data.scheduleSeries : [];
     data.scheduleOccurrenceStates = Array.isArray(data.scheduleOccurrenceStates) ? data.scheduleOccurrenceStates : [];
     data.scheduleDailyNotes = Array.isArray(data.scheduleDailyNotes) ? data.scheduleDailyNotes : [];
+    data.focusSessions = Array.isArray(data.focusSessions) ? data.focusSessions : [];
+    data.reviews = Array.isArray(data.reviews) ? data.reviews : [];
+    data.goals = Array.isArray(data.goals) ? data.goals : [];
+    data.milestones = Array.isArray(data.milestones) ? data.milestones : [];
     data.whiteboards = Array.isArray(data.whiteboards) ? data.whiteboards : [];
     const folderIds = new Set(data.categories.map((folder) => folder.id));
     data.categories.forEach((folder) => { folder.parentId = folder.parentId && folder.parentId !== folder.id && folderIds.has(folder.parentId) ? folder.parentId : null; });
@@ -1562,7 +1566,7 @@ import { WhiteboardManager } from "./whiteboard-manager";
 
   function contextForTarget(target) {
     const taskContext = taskManager?.contextForTarget(target); if (taskContext) return taskContext;
-    const scheduleContext = scheduleManager?.contextForTarget(target); if (scheduleContext) return scheduleContext;
+    const scheduleContext = scheduleManager?.contextForTarget?.(target); if (scheduleContext) return scheduleContext;
     if (target.closest("#secondaryContent")) return null;
     const link = target.closest("#contentEditor a[href]");
     if (link) return { items: linkMenu(link), payload: { link } };
@@ -1834,13 +1838,7 @@ import { WhiteboardManager } from "./whiteboard-manager";
       openNote: (id) => { taskManager.leave(); searchTerm = ""; els.searchInput.value = ""; const note = getNote(id); if (note?.categoryId) activeView = `category:${note.categoryId}`; selectNote(id); renderSidebar(); },
       openLink: (url) => { if (!url) return; taskManager.leave(); openLinkInEditor(url, url); }
     });
-    scheduleManager = new ScheduleManager({
-      state, safety, persist, toast: showToast, openContextMenu,
-      tasks: () => state.tasks,
-      fields: () => state.taskFields,
-      openSchedule: (date) => { setActiveView("schedule"); scheduleManager?.selectDate(date); renderSidebar(); },
-      openTask: (id) => { setActiveView("tasks"); taskManager?.openTask(id); renderSidebar(); }
-    });
+    scheduleManager = new VueScheduleAdapter(persist);
     whiteboardManager = new WhiteboardManager({
       state, safety, persist, toast: showToast,
       notes: () => state.notes,
@@ -1848,6 +1846,14 @@ import { WhiteboardManager } from "./whiteboard-manager";
       fields: () => state.taskFields,
       openNote: (id) => { const note = getNote(id); if (!note) return; if (note.categoryId) activeView = `category:${note.categoryId}`; selectNote(id); renderSidebar(); },
       openTask: (id) => { setActiveView("tasks"); taskManager?.openTask(id); renderSidebar(); }
+    });
+    installEasyNoteRuntime({
+      state,
+      safety,
+      persist,
+      toast: showToast,
+      openTask: (id) => { setActiveView("tasks"); taskManager?.openTask(id); renderSidebar(); },
+      openNote: (id) => { const note = getNote(id); if (!note) return; scheduleManager?.leave(); if (note.categoryId) activeView = `category:${note.categoryId}`; selectNote(id); renderSidebar(); }
     });
     setEditorMode(false); render(); bindEvents();
     let quickReport;

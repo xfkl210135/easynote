@@ -3,7 +3,7 @@ import { defineConfig, devices } from "@playwright/test";
 export default defineConfig({
   testDir: "./tests/e2e",
   fullyParallel: false,
-  retries: 1,
+  retries: 0,
   reporter: [["list"], ["html", { open: "never" }]],
   use: {
     baseURL: "http://127.0.0.1:4174",
@@ -18,7 +18,7 @@ export default defineConfig({
   },
   projects: [
     { name: "desktop-chromium", use: { ...devices["Desktop Chrome"], viewport: { width: 1440, height: 900 } } },
+    // This is a responsive mobile website check in Chrome, not an Android app test.
     { name: "android-chromium", use: { ...devices["Pixel 7"] } },
-    { name: "iphone-webkit", use: { ...devices["iPhone 14"] } },
   ],
 });

@@ -74,6 +74,11 @@ export interface ScheduleEntry {
   color?: string;
   completed?: boolean;
   taskId?: string;
+  noteId?: string;
+  url?: string;
+  urlLabel?: string;
+  reminderMode?: "auto" | "none" | "custom";
+  customReminderAt?: string;
   createdAt: ISODateString;
   updatedAt: ISODateString;
   revision?: number;
@@ -82,8 +87,12 @@ export interface ScheduleEntry {
 
 export interface ScheduleSeries extends ScheduleEntry {
   startDate: string;
-  recurrenceType: string;
+  recurrenceType: "daily" | "weekdays" | "weekly" | "monthly";
   recurrenceInterval: number;
+  weekdays?: number[];
+  dayOfMonth?: number;
+  until?: string;
+  active?: boolean;
 }
 
 export interface ScheduleOccurrenceState {
@@ -102,6 +111,83 @@ export interface ScheduleDailyNote {
   date: string;
   content: string;
   updatedAt: ISODateString;
+}
+
+export type FocusPhase = "focus" | "awaitingBreak" | "break";
+export type FocusStatus = "active" | "paused" | "completed" | "abandoned";
+
+export interface FocusSession {
+  id: string;
+  label: string;
+  taskId: string;
+  scheduleEntryId: string;
+  phase: FocusPhase;
+  status: FocusStatus;
+  focusMinutes: number;
+  breakMinutes: number;
+  startedAt: ISODateString;
+  phaseStartedAt: ISODateString;
+  endsAt: ISODateString;
+  pausedAt: ISODateString | null;
+  remainingMs: number;
+  actualSeconds: number;
+  completedAt: ISODateString | null;
+  updatedAt: ISODateString;
+  revision?: number;
+}
+
+export type ReviewPeriod = "daily" | "weekly" | "monthly";
+
+export interface ReviewMetrics {
+  completedTasks: number;
+  completedSchedules: number;
+  focusSessions: number;
+  focusMinutes: number;
+}
+
+export interface ReviewEntry {
+  id: string;
+  periodType: ReviewPeriod;
+  periodStart: string;
+  periodEnd: string;
+  answers: Record<string, string | number>;
+  freeform: string;
+  metrics: ReviewMetrics;
+  createdAt: ISODateString;
+  updatedAt: ISODateString;
+  revision?: number;
+}
+
+export type GoalStatus = "active" | "paused" | "completed" | "archived";
+
+export interface Goal {
+  id: string;
+  title: string;
+  description: string;
+  startDate: string;
+  dueDate: string;
+  color: string;
+  status: GoalStatus;
+  progressMode: "automatic" | "manual";
+  manualProgress: number;
+  createdAt: ISODateString;
+  updatedAt: ISODateString;
+  deletedAt: ISODateString | null;
+  revision?: number;
+}
+
+export interface Milestone {
+  id: string;
+  goalId: string;
+  title: string;
+  dueDate: string;
+  weight: number;
+  taskIds: string[];
+  completed: boolean;
+  createdAt: ISODateString;
+  updatedAt: ISODateString;
+  deletedAt: ISODateString | null;
+  revision?: number;
 }
 
 export interface WhiteboardNode {
@@ -156,6 +242,10 @@ export interface AppState {
   scheduleSeries: ScheduleSeries[];
   scheduleOccurrenceStates: ScheduleOccurrenceState[];
   scheduleDailyNotes: ScheduleDailyNote[];
+  focusSessions: FocusSession[];
+  reviews: ReviewEntry[];
+  goals: Goal[];
+  milestones: Milestone[];
   whiteboards: Whiteboard[];
 }
 

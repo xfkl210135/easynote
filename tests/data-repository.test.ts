@@ -24,6 +24,10 @@ describe("portable v8 compatibility", () => {
     expect(state.notes[0].favorite).toBe(false);
     expect(state.notes[0].deletedAt).toBeNull();
     expect(state.tasks).toEqual([]);
+    expect(state.focusSessions).toEqual([]);
+    expect(state.reviews).toEqual([]);
+    expect(state.goals).toEqual([]);
+    expect(state.milestones).toEqual([]);
     expect(state.whiteboards).toEqual([]);
   });
 

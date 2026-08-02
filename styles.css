@@ -493,6 +493,17 @@ body.moving-image { cursor: grabbing; user-select: none; }
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
 }
 
+/* Schedule and planning workspace */
+.schedule-workspace { grid-column: 3 / 6; min-width: 0; min-height: 0; height: 100%; display: flex; flex-direction: column; position: relative; overflow: hidden; background: var(--bg); }
+.schedule-workspace[hidden] { display: none; }
+#productivityCenterMount { min-width: 0; min-height: 0; flex: 1; display: flex; overflow: hidden; }
+body.schedule-mode .note-panel, body.schedule-mode #listResizer, body.schedule-mode .editor-panel { display: none !important; }
+body.schedule-mode .workspace { grid-template-columns: var(--sidebar-width) var(--splitter-width) minmax(0,1fr) !important; }
+body.schedule-mode .schedule-workspace { grid-column: 3; }
+body.schedule-mode .topbar { grid-template-columns: var(--sidebar-width) 1fr !important; }
+body.schedule-mode .search-box { grid-column: 1 / 3; }
+body.schedule-mode .layout-popover { display: none !important; }
+
 /* Task management workspace */
 .task-nav-item { margin-top: 8px; border-top: 1px solid var(--border); border-radius: 0 0 9px 9px; padding-top: 15px; }
 .task-workspace { grid-column: 3 / 6; min-width: 0; min-height: 0; height: 100%; background: var(--bg); overflow: hidden; display: flex; flex-direction: column; position: relative; }
@@ -645,6 +656,7 @@ body.task-column-resizing .task-column-resizer::after { background: var(--primar
 .task-option-config small { color: var(--muted); }
 .task-field-form-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 7px; }
 .task-field-form-actions .danger-button { margin-right: auto; }
+.task-field-form-error { margin: 0; padding: 9px 11px; border: 1px solid color-mix(in srgb,var(--danger) 35%,var(--border)); border-radius: 8px; color: var(--danger); background: color-mix(in srgb,var(--danger) 8%,var(--surface)); font-size: 12px; }
 .task-rule-modal, .task-card-modal { width: min(520px,calc(100vw - 40px)); }
 .task-rule-modal form, .task-card-modal form { display: flex; flex-direction: column; gap: 14px; padding: 20px; overflow-y: auto; }
 .task-rule-modal label { display: flex; flex-direction: column; gap: 6px; color: var(--text-soft); }
@@ -679,6 +691,9 @@ body.task-column-resizing .task-column-resizer::after { background: var(--primar
 .task-detail-history button { border: 0; border-radius: 5px; padding: 3px 6px; color: var(--primary); background: var(--primary-soft); }
 .task-detail-drawer > footer { flex: 0 0 auto; display: flex; justify-content: space-between; padding: 13px 18px; border-top: 1px solid var(--border); }
 @media (max-width: 959px) {
+  body.schedule-mode .workspace { display: block !important; }
+  body.schedule-mode .schedule-workspace { position: absolute; inset: 0; display: flex; }
+  body.schedule-mode .topbar .save-indicator { display: none; }
   body.task-mode .workspace { display: block !important; }
   body.task-mode .task-workspace { position: absolute; inset: 0; display: flex; }
   body.task-mode .topbar .save-indicator { display: none; }

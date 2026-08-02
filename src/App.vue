@@ -3,6 +3,11 @@ import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useRegisterSW } from "virtual:pwa-register/vue";
 import { useAppStore } from "./stores/app";
+import ProductiveCenter from "./components/ProductivityCenter.vue";
+import FocusTimer from "./components/FocusTimer.vue";
+import ScheduleReminder from "./components/ScheduleReminder.vue";
+import { easyNoteRuntime } from "./services/legacy-runtime";
+import "./productivity.css";
 
 type WorkspaceName = "notes" | "tasks" | "schedule" | "whiteboards";
 
@@ -66,7 +71,8 @@ function syncRouteFromLegacy() {
   activeWorkspace.value = workspace;
   if (routeSyncOrigin === "shell") return;
   if (workspace !== "notes") {
-    if (route.path !== routeForWorkspace[workspace]) {
+    const alreadyOnWorkspaceRoute = workspace === "schedule" ? route.path.startsWith("/schedule") : route.path === routeForWorkspace[workspace];
+    if (!alreadyOnWorkspaceRoute) {
       routeSyncOrigin = "legacy";
       void router.replace(routeForWorkspace[workspace]).finally(() => { if (routeSyncOrigin === "legacy") routeSyncOrigin = null; });
     }
@@ -106,9 +112,17 @@ let observer: MutationObserver | null = null;
 watch(() => route.path, (path) => {
   if (routeSyncOrigin) return;
   if (path === "/notes/edit") return;
+  if (path.startsWith("/schedule")) {
+    window.setTimeout(() => activateLegacyWorkspace("schedule"), 0);
+    return;
+  }
   const entry = Object.entries(routeForWorkspace).find(([, candidate]) => candidate === path);
   if (entry) window.setTimeout(() => activateLegacyWorkspace(entry[0] as WorkspaceName), 0);
   if (path === "/notes") document.querySelector<HTMLElement>("#backToList")?.click();
+});
+
+watch(easyNoteRuntime, () => {
+  if (route.path.startsWith("/schedule")) window.setTimeout(() => activateLegacyWorkspace("schedule"), 0);
 });
 
 onMounted(() => {
@@ -123,7 +137,7 @@ onMounted(() => {
   window.setTimeout(() => {
     const path = route.path;
     if (path === "/tasks") activateLegacyWorkspace("tasks");
-    else if (path === "/schedule") activateLegacyWorkspace("schedule");
+    else if (path.startsWith("/schedule")) activateLegacyWorkspace("schedule");
     else if (path === "/whiteboards") activateLegacyWorkspace("whiteboards");
     else syncRouteFromLegacy();
   }, 100);
@@ -160,5 +174,11 @@ onBeforeUnmount(() => {
   <aside v-if="needRefresh" class="pwa-status" role="status">
     <span>发现新版本，保存后即可更新</span><button type="button" @click="applyUpdate">保存并更新</button>
   </aside>
+
+  <Teleport v-if="easyNoteRuntime" to="#productivityCenterMount">
+    <ProductiveCenter />
+  </Teleport>
+  <FocusTimer />
+  <ScheduleReminder />
 
 </template>

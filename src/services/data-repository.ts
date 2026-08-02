@@ -93,6 +93,10 @@ export function normalizePortableState(input: unknown): AppState {
     scheduleSeries: Array.isArray(candidate.scheduleSeries) ? candidate.scheduleSeries : [],
     scheduleOccurrenceStates: Array.isArray(candidate.scheduleOccurrenceStates) ? candidate.scheduleOccurrenceStates : [],
     scheduleDailyNotes: Array.isArray(candidate.scheduleDailyNotes) ? candidate.scheduleDailyNotes : [],
+    focusSessions: Array.isArray(candidate.focusSessions) ? candidate.focusSessions : [],
+    reviews: Array.isArray(candidate.reviews) ? candidate.reviews : [],
+    goals: Array.isArray(candidate.goals) ? candidate.goals : [],
+    milestones: Array.isArray(candidate.milestones) ? candidate.milestones : [],
     whiteboards: Array.isArray(candidate.whiteboards) ? candidate.whiteboards : [],
   } as AppState;
 }

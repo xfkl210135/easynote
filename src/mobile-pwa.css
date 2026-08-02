@@ -115,8 +115,9 @@
   .mobile-bottom-nav b { font-size: 11px; font-weight: 650; }
 
   .pwa-status {
+    top: calc(var(--safe-top) + 68px);
     right: max(10px, var(--safe-right));
-    bottom: calc(var(--mobile-nav-height) + var(--safe-bottom) + 10px);
+    bottom: auto;
     left: max(10px, var(--safe-left));
     justify-content: space-between;
     max-width: none;
