@@ -96,6 +96,34 @@
       this.versionUpgradeFailure = null;
       this.migrationPrepared = false;
       this.migrationFromVersion = null;
+      this.instanceId = makeId("tab");
+      this.baselines = new Map();
+      this.syncChannel = typeof BroadcastChannel === "function" ? new BroadcastChannel("easynote-sync-v1") : null;
+      if (this.syncChannel) this.syncChannel.onmessage = (event) => {
+        const detail = event.data || {};
+        if (detail.source === this.instanceId || detail.type !== "commit") return;
+        window.dispatchEvent(new CustomEvent("easynote:external-commit", { detail }));
+      };
+    }
+
+    captureBaseline(storeName, records) {
+      this.baselines.set(storeName, new Map((records || []).map((record) => [record.id, record.checksum || ""])));
+    }
+
+    baselineChecksum(storeName, id) { return this.baselines.get(storeName)?.get(id) || ""; }
+    baselineHas(storeName, id) { return this.baselines.get(storeName)?.has(id) || false; }
+    updateBaseline(storeName, record) {
+      if (!this.baselines.has(storeName)) this.baselines.set(storeName, new Map());
+      this.baselines.get(storeName).set(record.id, record.checksum || "");
+    }
+    removeBaseline(storeName, id) { this.baselines.get(storeName)?.delete(id); }
+
+    captureStateBaselines(state) {
+      for (const [storeName, records] of [[STORES.notes, state?.notes], [STORES.folders, state?.categories], [STORES.files, state?.files], [STORES.tasks, state?.tasks], [STORES.taskFields, state?.taskFields], [STORES.taskViews, state?.taskViews], [STORES.scheduleEntries, state?.scheduleEntries], [STORES.scheduleSeries, state?.scheduleSeries], [STORES.scheduleOccurrenceStates, state?.scheduleOccurrenceStates], [STORES.scheduleDailyNotes, state?.scheduleDailyNotes], [STORES.whiteboards, state?.whiteboards], [STORES.focusSessions, state?.focusSessions], [STORES.reviews, state?.reviews], [STORES.goals, state?.goals], [STORES.milestones, state?.milestones]]) this.captureBaseline(storeName, records || []);
+    }
+
+    broadcastCommit(result) {
+      this.syncChannel?.postMessage({ type: "commit", source: this.instanceId, ...result });
     }
 
     emitStatus(status, detail = {}) {
@@ -237,7 +265,7 @@
       await transactionDone(transaction);
     }
 
-    async load() {
+    async load(captureBaselines = true) {
       await this.open();
       this.backupDirectoryHandle = (await this.get(STORES.settings, "backupDirectory"))?.value || null;
       let notes = await this.getAll(STORES.notes);
@@ -254,23 +282,24 @@
         this.getAll(STORES.taskFields), this.getAll(STORES.taskViews), this.getAll(STORES.scheduleEntries), this.getAll(STORES.scheduleSeries), this.getAll(STORES.scheduleOccurrenceStates), this.getAll(STORES.scheduleDailyNotes), this.getAll(STORES.whiteboards), this.getAll(STORES.focusSessions), this.getAll(STORES.reviews), this.getAll(STORES.goals), this.getAll(STORES.milestones)
       ]);
       if (!notes.length && !folders.length && !files.length && !tasks.length && !taskFields.length && !taskViews.length && !scheduleEntries.length && !scheduleSeries.length && !scheduleOccurrenceStates.length && !scheduleDailyNotes.length && !whiteboards.length && !focusSessions.length && !reviews.length && !goals.length && !milestones.length) { this.wasEmpty = true; return null; }
+      if (captureBaselines) for (const [storeName, records] of [[STORES.notes, notes], [STORES.folders, folders], [STORES.files, files], [STORES.tasks, tasks], [STORES.taskFields, taskFields], [STORES.taskViews, taskViews], [STORES.scheduleEntries, scheduleEntries], [STORES.scheduleSeries, scheduleSeries], [STORES.scheduleOccurrenceStates, scheduleOccurrenceStates], [STORES.scheduleDailyNotes, scheduleDailyNotes], [STORES.whiteboards, whiteboards], [STORES.focusSessions, focusSessions], [STORES.reviews, reviews], [STORES.goals, goals], [STORES.milestones, milestones]]) this.captureBaseline(storeName, records);
       const state = {
         version: 8,
-        categories: folders.map(({ checksum, ...folder }) => folder),
-        files: files.map(({ checksum, ...file }) => file),
+        categories: folders.map((folder) => ({ ...folder })),
+        files: files.map((file) => ({ ...file })),
         notes: notes.map((note) => ({ ...note, content: this.hydrateContent(note.content || "") })),
-        tasks: tasks.map(({ checksum, ...task }) => task),
-        taskFields: taskFields.map(({ checksum, ...field }) => field),
-        taskViews: taskViews.map(({ checksum, ...view }) => view),
-        scheduleEntries: scheduleEntries.map(({ checksum, ...entry }) => entry),
-        scheduleSeries: scheduleSeries.map(({ checksum, ...series }) => series),
-        scheduleOccurrenceStates: scheduleOccurrenceStates.map(({ checksum, ...occurrence }) => occurrence),
-        scheduleDailyNotes: scheduleDailyNotes.map(({ checksum, ...dailyNote }) => dailyNote),
-        focusSessions: focusSessions.map(({ checksum, ...session }) => session),
-        reviews: reviews.map(({ checksum, ...review }) => review),
-        goals: goals.map(({ checksum, ...goal }) => goal),
-        milestones: milestones.map(({ checksum, ...milestone }) => milestone),
-        whiteboards: whiteboards.map(({ checksum, ...board }) => board)
+        tasks: tasks.map((task) => ({ ...task })),
+        taskFields: taskFields.map((field) => ({ ...field })),
+        taskViews: taskViews.map((view) => ({ ...view })),
+        scheduleEntries: scheduleEntries.map((entry) => ({ ...entry })),
+        scheduleSeries: scheduleSeries.map((series) => ({ ...series })),
+        scheduleOccurrenceStates: scheduleOccurrenceStates.map((occurrence) => ({ ...occurrence })),
+        scheduleDailyNotes: scheduleDailyNotes.map((dailyNote) => ({ ...dailyNote })),
+        focusSessions: focusSessions.map((session) => ({ ...session })),
+        reviews: reviews.map((review) => ({ ...review })),
+        goals: goals.map((goal) => ({ ...goal })),
+        milestones: milestones.map((milestone) => ({ ...milestone })),
+        whiteboards: whiteboards.map((board) => ({ ...board }))
       };
       const lastCommit = await this.get(STORES.meta, "lastCommit");
       if (lastCommit) this.emitStatus("saved", { verifiedAt: lastCommit.committedAt });
@@ -391,10 +420,10 @@
         width: Math.max(140, Number(node.width) || (node.type === "group" ? 460 : 260)), height: Math.max(80, Number(node.height) || (node.type === "group" ? 300 : 160)),
         zIndex: Number.isFinite(node.zIndex) ? node.zIndex : index + 1, color: color(node.color), groupId: node.groupId || "",
         text: node.text || "", noteId: node.noteId || "", taskId: node.taskId || "", attachmentId: node.attachmentId || "", url: node.url || "", title: node.title || ""
-      }));
+      }), STORES.scheduleEntries, "schedule");
       const edges = (Array.isArray(board.edges) ? board.edges : []).map((edge) => ({
         id: edge.id, sourceId: edge.sourceId || "", targetId: edge.targetId || "", sourceSide: sides.has(edge.sourceSide) ? edge.sourceSide : "right", targetSide: sides.has(edge.targetSide) ? edge.targetSide : "left", color: color(edge.color)
-      }));
+      }), STORES.scheduleSeries, "scheduleSeries");
       const viewport = board.viewport && typeof board.viewport === "object" ? board.viewport : {};
       return {
         id: board.id, title: board.title || "未命名白板", nodes, edges,
@@ -404,6 +433,11 @@
     }
 
     async saveState(inputState, reason = "auto") {
+      if (navigator.locks?.request) return navigator.locks.request("easynote-database-write", () => this.saveStateLocked(inputState, reason));
+      return this.saveStateLocked(inputState, reason);
+    }
+
+    async saveStateLocked(inputState, reason = "auto") {
       await this.open();
       const snapshot = await this.prepareInlineAttachments(structuredClone(inputState));
       const hydratedNotes = new Map((snapshot.notes || []).map((note) => [note.id, note]));
@@ -435,29 +469,64 @@
       const milestoneMap = new Map(existingMilestones.map((item) => [item.id, item]));
       const preparedNotes = [];
       const changedNotes = [];
+      const conflicts = [];
       for (const note of snapshot.notes || []) {
         const payload = this.notePayload(note);
         const checksum = await sha256(stableStringify(payload));
         const previous = noteMap.get(note.id);
+        const baseline = this.baselineChecksum(STORES.notes, note.id);
+        const locallyChanged = !baseline || checksum !== baseline;
+        const externalChanged = Boolean(baseline && previous?.checksum !== baseline);
+        if (externalChanged || (!previous && baseline) || (previous && !baseline && previous.checksum !== checksum)) {
+          if (!locallyChanged && previous) { preparedNotes.push(previous); continue; }
+          if (!locallyChanged) continue;
+          const stamp = isoNow();
+          const conflictPayload = { ...payload, id: makeId("note-conflict"), title: `${payload.title || "无标题笔记"}（多页面冲突副本）`, createdAt: stamp, updatedAt: stamp, deletedAt: null };
+          const conflictChecksum = await sha256(stableStringify(conflictPayload));
+          const conflictRecord = { ...conflictPayload, revision: 1, checksum: conflictChecksum };
+          if (previous) preparedNotes.push(previous);
+          preparedNotes.push(conflictRecord); changedNotes.push(conflictRecord);
+          conflicts.push({ kind: "note", originalId: note.id, copy: { ...conflictRecord, content: this.hydrateContent(conflictRecord.content || "") }, remote: previous ? { ...previous, content: this.hydrateContent(previous.content || "") } : null });
+          continue;
+        }
         const record = { ...payload, revision: previous?.checksum === checksum ? previous.revision || 1 : (previous?.revision || 0) + 1, checksum };
         preparedNotes.push(record);
-        if (!previous || previous.checksum !== checksum) changedNotes.push(record);
+        if (locallyChanged && (!previous || previous.checksum !== checksum)) changedNotes.push(record);
       }
-      const preparedFolders = await Promise.all((snapshot.categories || []).map(async (folder) => {
-        const clean = { id: folder.id, name: folder.name || "未命名文件夹", color: folder.color || "", parentId: folder.parentId || null };
-        return { ...clean, checksum: await sha256(stableStringify(clean)) };
-      }));
-      const preparedFiles = await Promise.all((snapshot.files || []).map(async (file) => {
-        const clean = { id: file.id, name: file.name || "本地文件", type: file.type || "application/octet-stream", size: file.size || 0, folderId: file.folderId || "", attachmentId: file.attachmentId || "", createdAt: file.createdAt || isoNow() };
-        return { ...clean, checksum: await sha256(stableStringify(clean)) };
-      }));
-      const prepareVersioned = async (items, previousMap, cleanItem) => {
+      const prepareSimple = async (items, previousMap, cleanItem, storeName, kind) => {
         const prepared = [], changed = [];
         for (const item of items || []) {
-          const clean = cleanItem(item), checksum = await sha256(stableStringify(clean)), previous = previousMap.get(item.id);
+          const clean = cleanItem(item), checksum = await sha256(stableStringify(clean)), previous = previousMap.get(item.id), baseline = this.baselineChecksum(storeName, item.id);
+          const locallyChanged = !baseline || checksum !== baseline;
+          const externalChanged = Boolean(baseline && previous?.checksum !== baseline);
+          if (externalChanged || (!previous && baseline) || (previous && !baseline && previous.checksum !== checksum)) {
+            if (locallyChanged) conflicts.push({ kind, id: item.id, label: clean.name || item.id, local: clean, remote: previous || null });
+            if (previous) prepared.push(previous);
+            continue;
+          }
+          const record = { ...clean, checksum };
+          prepared.push(record);
+          if (locallyChanged && (!previous || previous.checksum !== checksum)) changed.push(record);
+        }
+        return { prepared, changed };
+      };
+      const folderResult = await prepareSimple(snapshot.categories, folderMap, (folder) => ({ id: folder.id, name: folder.name || "未命名文件夹", color: folder.color || "", parentId: folder.parentId || null }), STORES.folders, "folder");
+      const fileResult = await prepareSimple(snapshot.files, fileMap, (file) => ({ id: file.id, name: file.name || "本地文件", type: file.type || "application/octet-stream", size: file.size || 0, folderId: file.folderId || "", attachmentId: file.attachmentId || "", createdAt: file.createdAt || isoNow() }), STORES.files, "file");
+      const preparedFolders = folderResult.prepared, preparedFiles = fileResult.prepared;
+      const prepareVersioned = async (items, previousMap, cleanItem, storeName, kind) => {
+        const prepared = [], changed = [];
+        for (const item of items || []) {
+          const clean = cleanItem(item), checksum = await sha256(stableStringify(clean)), previous = previousMap.get(item.id), baseline = this.baselineChecksum(storeName, item.id);
+          const locallyChanged = !baseline || checksum !== baseline;
+          const externalChanged = Boolean(baseline && previous?.checksum !== baseline);
+          if (externalChanged || (!previous && baseline) || (previous && !baseline && previous.checksum !== checksum)) {
+            if (locallyChanged) conflicts.push({ kind, id: item.id, label: clean.title || clean.name || item.id, local: clean, remote: previous || null });
+            if (previous) prepared.push(previous);
+            continue;
+          }
           const record = { ...clean, revision: previous?.checksum === checksum ? previous.revision || 1 : (previous?.revision || 0) + 1, checksum };
           prepared.push(record);
-          if (!previous || previous.checksum !== checksum) changed.push(record);
+          if (locallyChanged && (!previous || previous.checksum !== checksum)) changed.push(record);
         }
         return { prepared, changed };
       };
@@ -465,18 +534,18 @@
         id: task.id, values: task.values && typeof task.values === "object" ? task.values : {}, sortOrder: Number(task.sortOrder) || 0,
         createdAt: task.createdAt || isoNow(), updatedAt: task.updatedAt || isoNow(), completedAt: task.completedAt || null,
         previousIncompleteProgress: Number.isFinite(task.previousIncompleteProgress) ? task.previousIncompleteProgress : null
-      }));
+      }), STORES.tasks, "task");
       const fieldResult = await prepareVersioned(snapshot.taskFields, taskFieldMap, (field) => ({
         id: field.id, name: field.name || "未命名字段", type: field.type || "text", description: field.description || "",
         systemRole: field.systemRole || "", required: Boolean(field.required), hidden: Boolean(field.hidden), width: Math.max(90, Number(field.width) || 160),
         options: Array.isArray(field.options) ? field.options : [], config: field.config && typeof field.config === "object" ? field.config : {},
         order: Number(field.order) || 0, createdAt: field.createdAt || isoNow(), updatedAt: field.updatedAt || isoNow()
-      }));
+      }), STORES.taskFields, "taskField");
       const viewResult = await prepareVersioned(snapshot.taskViews, taskViewMap, (view) => ({
         id: view.id || "main", tableGroupFieldId: view.tableGroupFieldId || "", boardGroupFieldId: view.boardGroupFieldId || "",
         filters: Array.isArray(view.filters) ? view.filters : [], sorts: Array.isArray(view.sorts) ? view.sorts : [],
         cardFieldIds: Array.isArray(view.cardFieldIds) ? view.cardFieldIds.slice(0, 5) : [], collapsedGroups: Array.isArray(view.collapsedGroups) ? view.collapsedGroups : []
-      }));
+      }), STORES.taskViews, "taskView");
       const scheduleResult = await prepareVersioned(snapshot.scheduleEntries, scheduleMap, (entry) => ({
         id: entry.id, title: entry.title || "未命名日程", date: entry.date || "", allDay: entry.allDay !== false,
         startTime: entry.allDay === false ? entry.startTime || "" : "", endTime: entry.allDay === false ? entry.endTime || "" : "",
@@ -488,7 +557,7 @@
         recurrenceInterval: Math.max(1, Number(entry.recurrenceInterval) || 1), repeatUntil: entry.repeatUntil || "",
         excludedDates: Array.isArray(entry.excludedDates) ? [...new Set(entry.excludedDates)].sort() : [],
         createdAt: entry.createdAt || isoNow(), updatedAt: entry.updatedAt || isoNow()
-      }));
+      }), STORES.scheduleEntries, "schedule");
       const scheduleSeriesResult = await prepareVersioned(snapshot.scheduleSeries, scheduleSeriesMap, (series) => ({
         id: series.id, title: series.title || "未命名固定日程", startDate: series.startDate || "", allDay: series.allDay !== false,
         startTime: series.allDay === false ? series.startTime || "" : "", endTime: series.allDay === false ? series.endTime || "" : "",
@@ -501,13 +570,13 @@
       const scheduleOccurrenceResult = await prepareVersioned(snapshot.scheduleOccurrenceStates, scheduleOccurrenceMap, (occurrence) => ({
         id: occurrence.id, seriesId: occurrence.seriesId || "", date: occurrence.date || "", completed: Boolean(occurrence.completed), deleted: Boolean(occurrence.deleted),
         override: occurrence.override && typeof occurrence.override === "object" ? occurrence.override : {}, updatedAt: occurrence.updatedAt || isoNow()
-      }));
-      const scheduleDailyNoteResult = await prepareVersioned(snapshot.scheduleDailyNotes, scheduleDailyNoteMap, (dailyNote) => ({ id: dailyNote.id || dailyNote.date, date: dailyNote.date || dailyNote.id || "", content: String(dailyNote.content || ""), updatedAt: dailyNote.updatedAt || isoNow() }));
-      const whiteboardResult = await prepareVersioned(snapshot.whiteboards, whiteboardMap, (board) => this.whiteboardPayload(board));
-      const focusResult = await prepareVersioned(snapshot.focusSessions, focusSessionMap, (session) => ({ id: session.id, label: String(session.label || "专注"), taskId: session.taskId || "", scheduleEntryId: session.scheduleEntryId || "", phase: ["focus", "awaitingBreak", "break"].includes(session.phase) ? session.phase : "focus", status: ["active", "paused", "completed", "abandoned"].includes(session.status) ? session.status : "completed", focusMinutes: Math.max(1, Number(session.focusMinutes) || 25), breakMinutes: Math.max(1, Number(session.breakMinutes) || 5), startedAt: session.startedAt || isoNow(), phaseStartedAt: session.phaseStartedAt || session.startedAt || isoNow(), endsAt: session.endsAt || isoNow(), pausedAt: session.pausedAt || null, remainingMs: Math.max(0, Number(session.remainingMs) || 0), actualSeconds: Math.max(0, Number(session.actualSeconds) || 0), completedAt: session.completedAt || null, updatedAt: session.updatedAt || isoNow() }));
-      const reviewResult = await prepareVersioned(snapshot.reviews, reviewMap, (review) => ({ id: review.id, periodType: ["daily", "weekly", "monthly"].includes(review.periodType) ? review.periodType : "daily", periodStart: review.periodStart || "", periodEnd: review.periodEnd || review.periodStart || "", answers: review.answers && typeof review.answers === "object" ? review.answers : {}, freeform: String(review.freeform || ""), metrics: review.metrics && typeof review.metrics === "object" ? review.metrics : { completedTasks: 0, completedSchedules: 0, focusSessions: 0, focusMinutes: 0 }, createdAt: review.createdAt || isoNow(), updatedAt: review.updatedAt || isoNow() }));
-      const goalResult = await prepareVersioned(snapshot.goals, goalMap, (goal) => ({ id: goal.id, title: String(goal.title || "未命名目标"), description: String(goal.description || ""), startDate: goal.startDate || "", dueDate: goal.dueDate || "", color: goal.color || "#4f7df3", status: ["active", "paused", "completed", "archived"].includes(goal.status) ? goal.status : "active", progressMode: goal.progressMode === "manual" ? "manual" : "automatic", manualProgress: Math.min(100, Math.max(0, Number(goal.manualProgress) || 0)), createdAt: goal.createdAt || isoNow(), updatedAt: goal.updatedAt || isoNow(), deletedAt: goal.deletedAt || null }));
-      const milestoneResult = await prepareVersioned(snapshot.milestones, milestoneMap, (milestone) => ({ id: milestone.id, goalId: milestone.goalId || "", title: String(milestone.title || "未命名里程碑"), dueDate: milestone.dueDate || "", weight: Math.max(1, Number(milestone.weight) || 1), taskIds: Array.isArray(milestone.taskIds) ? [...new Set(milestone.taskIds)] : [], completed: Boolean(milestone.completed), createdAt: milestone.createdAt || isoNow(), updatedAt: milestone.updatedAt || isoNow(), deletedAt: milestone.deletedAt || null }));
+      }), STORES.scheduleOccurrenceStates, "scheduleOccurrence");
+      const scheduleDailyNoteResult = await prepareVersioned(snapshot.scheduleDailyNotes, scheduleDailyNoteMap, (dailyNote) => ({ id: dailyNote.id || dailyNote.date, date: dailyNote.date || dailyNote.id || "", content: String(dailyNote.content || ""), updatedAt: dailyNote.updatedAt || isoNow() }), STORES.scheduleDailyNotes, "scheduleDailyNote");
+      const whiteboardResult = await prepareVersioned(snapshot.whiteboards, whiteboardMap, (board) => this.whiteboardPayload(board), STORES.whiteboards, "whiteboard");
+      const focusResult = await prepareVersioned(snapshot.focusSessions, focusSessionMap, (session) => ({ id: session.id, label: String(session.label || "专注"), taskId: session.taskId || "", scheduleEntryId: session.scheduleEntryId || "", phase: ["focus", "awaitingBreak", "break"].includes(session.phase) ? session.phase : "focus", status: ["active", "paused", "completed", "abandoned"].includes(session.status) ? session.status : "completed", focusMinutes: Math.max(1, Number(session.focusMinutes) || 25), breakMinutes: Math.max(1, Number(session.breakMinutes) || 5), startedAt: session.startedAt || isoNow(), phaseStartedAt: session.phaseStartedAt || session.startedAt || isoNow(), endsAt: session.endsAt || isoNow(), pausedAt: session.pausedAt || null, remainingMs: Math.max(0, Number(session.remainingMs) || 0), actualSeconds: Math.max(0, Number(session.actualSeconds) || 0), focusCompletedAt: session.focusCompletedAt || null, completedAt: session.completedAt || null, updatedAt: session.updatedAt || isoNow() }), STORES.focusSessions, "focusSession");
+      const reviewResult = await prepareVersioned(snapshot.reviews, reviewMap, (review) => ({ id: review.id, periodType: ["daily", "weekly", "monthly"].includes(review.periodType) ? review.periodType : "daily", periodStart: review.periodStart || "", periodEnd: review.periodEnd || review.periodStart || "", answers: review.answers && typeof review.answers === "object" ? review.answers : {}, freeform: String(review.freeform || ""), metrics: review.metrics && typeof review.metrics === "object" ? review.metrics : { completedTasks: 0, completedSchedules: 0, focusSessions: 0, focusMinutes: 0 }, createdAt: review.createdAt || isoNow(), updatedAt: review.updatedAt || isoNow() }), STORES.reviews, "review");
+      const goalResult = await prepareVersioned(snapshot.goals, goalMap, (goal) => ({ id: goal.id, title: String(goal.title || "未命名目标"), description: String(goal.description || ""), startDate: goal.startDate || "", dueDate: goal.dueDate || "", color: goal.color || "#4f7df3", status: ["active", "paused", "completed", "archived"].includes(goal.status) ? goal.status : "active", progressMode: goal.progressMode === "manual" ? "manual" : "automatic", manualProgress: Math.min(100, Math.max(0, Number(goal.manualProgress) || 0)), createdAt: goal.createdAt || isoNow(), updatedAt: goal.updatedAt || isoNow(), deletedAt: goal.deletedAt || null }), STORES.goals, "goal");
+      const milestoneResult = await prepareVersioned(snapshot.milestones, milestoneMap, (milestone) => ({ id: milestone.id, goalId: milestone.goalId || "", title: String(milestone.title || "未命名里程碑"), dueDate: milestone.dueDate || "", weight: Math.max(1, Number(milestone.weight) || 1), taskIds: Array.isArray(milestone.taskIds) ? [...new Set(milestone.taskIds)] : [], completed: Boolean(milestone.completed), createdAt: milestone.createdAt || isoNow(), updatedAt: milestone.updatedAt || isoNow(), deletedAt: milestone.deletedAt || null }), STORES.milestones, "milestone");
       const changedScheduleCount = scheduleResult.changed.length + scheduleSeriesResult.changed.length + scheduleOccurrenceResult.changed.length + scheduleDailyNoteResult.changed.length;
       const operation = { id: makeId("op"), state: "pending", reason, createdAt: isoNow(), noteIds: changedNotes.map((item) => item.id), taskIds: taskResult.changed.map((item) => item.id), scheduleIds: scheduleResult.changed.map((item) => item.id), scheduleSeriesIds: scheduleSeriesResult.changed.map((item) => item.id), scheduleOccurrenceIds: scheduleOccurrenceResult.changed.map((item) => item.id), scheduleDailyNoteIds: scheduleDailyNoteResult.changed.map((item) => item.id), whiteboardIds: whiteboardResult.changed.map((item) => item.id) };
       await this.put(STORES.operations, operation);
@@ -545,21 +614,22 @@
         reviewResult.prepared.forEach((item) => { if (reviewMap.get(item.id)?.checksum !== item.checksum) reviewStore.put(item); });
         goalResult.prepared.forEach((item) => { if (goalMap.get(item.id)?.checksum !== item.checksum) goalStore.put(item); });
         milestoneResult.prepared.forEach((item) => { if (milestoneMap.get(item.id)?.checksum !== item.checksum) milestoneStore.put(item); });
-        existingNotes.forEach((item) => { if (!nextNoteIds.has(item.id)) notesStore.delete(item.id); });
-        existingFolders.forEach((item) => { if (!nextFolderIds.has(item.id)) foldersStore.delete(item.id); });
-        existingFiles.forEach((item) => { if (!nextFileIds.has(item.id)) filesStore.delete(item.id); });
-        existingTasks.forEach((item) => { if (!nextTaskIds.has(item.id)) tasksStore.delete(item.id); });
-        existingTaskFields.forEach((item) => { if (!nextTaskFieldIds.has(item.id)) taskFieldsStore.delete(item.id); });
-        existingTaskViews.forEach((item) => { if (!nextTaskViewIds.has(item.id)) taskViewsStore.delete(item.id); });
-        existingScheduleEntries.forEach((item) => { if (!nextScheduleIds.has(item.id)) scheduleStore.delete(item.id); });
-        existingScheduleSeries.forEach((item) => { if (!nextScheduleSeriesIds.has(item.id)) scheduleSeriesStore.delete(item.id); });
-        existingScheduleOccurrenceStates.forEach((item) => { if (!nextScheduleOccurrenceIds.has(item.id)) scheduleOccurrenceStore.delete(item.id); });
-        existingScheduleDailyNotes.forEach((item) => { if (!nextScheduleDailyNoteIds.has(item.id)) scheduleDailyNoteStore.delete(item.id); });
-        existingWhiteboards.forEach((item) => { if (!nextWhiteboardIds.has(item.id)) whiteboardStore.delete(item.id); });
-        existingFocusSessions.forEach((item) => { if (!nextFocusIds.has(item.id)) focusStore.delete(item.id); });
-        existingReviews.forEach((item) => { if (!nextReviewIds.has(item.id)) reviewStore.delete(item.id); });
-        existingGoals.forEach((item) => { if (!nextGoalIds.has(item.id)) goalStore.delete(item.id); });
-        existingMilestones.forEach((item) => { if (!nextMilestoneIds.has(item.id)) milestoneStore.delete(item.id); });
+        const deleteKnownMissing = (records, nextIds, storeName, target) => records.forEach((item) => { if (!nextIds.has(item.id) && this.baselineHas(storeName, item.id)) target.delete(item.id); });
+        deleteKnownMissing(existingNotes, nextNoteIds, STORES.notes, notesStore);
+        deleteKnownMissing(existingFolders, nextFolderIds, STORES.folders, foldersStore);
+        deleteKnownMissing(existingFiles, nextFileIds, STORES.files, filesStore);
+        deleteKnownMissing(existingTasks, nextTaskIds, STORES.tasks, tasksStore);
+        deleteKnownMissing(existingTaskFields, nextTaskFieldIds, STORES.taskFields, taskFieldsStore);
+        deleteKnownMissing(existingTaskViews, nextTaskViewIds, STORES.taskViews, taskViewsStore);
+        deleteKnownMissing(existingScheduleEntries, nextScheduleIds, STORES.scheduleEntries, scheduleStore);
+        deleteKnownMissing(existingScheduleSeries, nextScheduleSeriesIds, STORES.scheduleSeries, scheduleSeriesStore);
+        deleteKnownMissing(existingScheduleOccurrenceStates, nextScheduleOccurrenceIds, STORES.scheduleOccurrenceStates, scheduleOccurrenceStore);
+        deleteKnownMissing(existingScheduleDailyNotes, nextScheduleDailyNoteIds, STORES.scheduleDailyNotes, scheduleDailyNoteStore);
+        deleteKnownMissing(existingWhiteboards, nextWhiteboardIds, STORES.whiteboards, whiteboardStore);
+        deleteKnownMissing(existingFocusSessions, nextFocusIds, STORES.focusSessions, focusStore);
+        deleteKnownMissing(existingReviews, nextReviewIds, STORES.reviews, reviewStore);
+        deleteKnownMissing(existingGoals, nextGoalIds, STORES.goals, goalStore);
+        deleteKnownMissing(existingMilestones, nextMilestoneIds, STORES.milestones, milestoneStore);
         const committedAt = isoNow();
         transaction.objectStore(STORES.operations).put({ ...operation, state: "committed", committedAt });
         transaction.objectStore(STORES.meta).put({ key: "lastCommit", id: operation.id, committedAt, reason, changedNotes: changedNotes.length, changedTasks: taskResult.changed.length, changedTaskFields: fieldResult.changed.length, changedSchedules: changedScheduleCount, changedWhiteboards: whiteboardResult.changed.length, changedFocusSessions: focusResult.changed.length, changedReviews: reviewResult.changed.length, changedGoals: goalResult.changed.length, changedMilestones: milestoneResult.changed.length });
@@ -599,8 +669,15 @@
         }
         await this.maybeCreateHistory(changedNotes, reason);
         await this.maybeCreateTaskHistory(taskResult.changed, fieldResult.changed, reason);
+        for (const conflict of conflicts.filter((item) => item.kind !== "note")) await this.recordRecovery("multi-tab-conflict", `多页面冲突：${conflict.label || conflict.id}`, { kind: conflict.kind, local: conflict.local, remote: conflict.remote });
+        for (const [storeName, records] of [[STORES.notes, changedNotes], [STORES.folders, folderResult.changed], [STORES.files, fileResult.changed], [STORES.tasks, taskResult.changed], [STORES.taskFields, fieldResult.changed], [STORES.taskViews, viewResult.changed], [STORES.scheduleEntries, scheduleResult.changed], [STORES.scheduleSeries, scheduleSeriesResult.changed], [STORES.scheduleOccurrenceStates, scheduleOccurrenceResult.changed], [STORES.scheduleDailyNotes, scheduleDailyNoteResult.changed], [STORES.whiteboards, whiteboardResult.changed], [STORES.focusSessions, focusResult.changed], [STORES.reviews, reviewResult.changed], [STORES.goals, goalResult.changed], [STORES.milestones, milestoneResult.changed]]) records.forEach((record) => this.updateBaseline(storeName, record));
+        for (const conflict of conflicts) {
+          if (conflict.kind === "note" && conflict.remote) this.updateBaseline(STORES.notes, conflict.remote);
+        }
+        for (const [storeName, existing, nextIds] of [[STORES.notes, existingNotes, nextNoteIds], [STORES.folders, existingFolders, nextFolderIds], [STORES.files, existingFiles, nextFileIds], [STORES.tasks, existingTasks, nextTaskIds], [STORES.taskFields, existingTaskFields, nextTaskFieldIds], [STORES.taskViews, existingTaskViews, nextTaskViewIds], [STORES.scheduleEntries, existingScheduleEntries, nextScheduleIds], [STORES.scheduleSeries, existingScheduleSeries, nextScheduleSeriesIds], [STORES.scheduleOccurrenceStates, existingScheduleOccurrenceStates, nextScheduleOccurrenceIds], [STORES.scheduleDailyNotes, existingScheduleDailyNotes, nextScheduleDailyNoteIds], [STORES.whiteboards, existingWhiteboards, nextWhiteboardIds], [STORES.focusSessions, existingFocusSessions, nextFocusIds], [STORES.reviews, existingReviews, nextReviewIds], [STORES.goals, existingGoals, nextGoalIds], [STORES.milestones, existingMilestones, nextMilestoneIds]]) existing.forEach((record) => { if (!nextIds.has(record.id) && this.baselineHas(storeName, record.id)) this.removeBaseline(storeName, record.id); });
         this.lastError = null;
-        return { committedAt, operationId: operation.id, changedNotes: changedNotes.length, changedTasks: taskResult.changed.length, changedSchedules: changedScheduleCount, changedWhiteboards: whiteboardResult.changed.length, changedFocusSessions: focusResult.changed.length, changedReviews: reviewResult.changed.length, changedGoals: goalResult.changed.length, changedMilestones: milestoneResult.changed.length };
+        const totalChanges = changedNotes.length + folderResult.changed.length + fileResult.changed.length + taskResult.changed.length + fieldResult.changed.length + viewResult.changed.length + changedScheduleCount + whiteboardResult.changed.length + focusResult.changed.length + reviewResult.changed.length + goalResult.changed.length + milestoneResult.changed.length;
+        return { committedAt, operationId: operation.id, reason, totalChanges, changedNotes: changedNotes.length, changedNoteIds: changedNotes.map((item) => item.id), changedTasks: taskResult.changed.length, changedTaskIds: taskResult.changed.map((item) => item.id), changedSchedules: changedScheduleCount, changedScheduleIds: [...scheduleResult.changed, ...scheduleSeriesResult.changed, ...scheduleOccurrenceResult.changed, ...scheduleDailyNoteResult.changed].map((item) => item.id), changedWhiteboards: whiteboardResult.changed.length, changedWhiteboardIds: whiteboardResult.changed.map((item) => item.id), changedFocusSessions: focusResult.changed.length, changedReviews: reviewResult.changed.length, changedGoals: goalResult.changed.length, changedMilestones: milestoneResult.changed.length, conflicts };
       } catch (error) {
         operation.state = "failed"; operation.failedAt = isoNow(); operation.error = String(error?.message || error);
         try { await this.put(STORES.operations, operation); } catch { /* preserve the original failure */ }
@@ -632,7 +709,9 @@
         this.emitStatus("saving");
         try {
           const result = await this.saveState(snapshot, reason);
-          this.emitStatus(this.pendingSnapshot ? "dirty" : "saved", { verifiedAt: result.committedAt });
+          this.emitStatus(this.pendingSnapshot ? "dirty" : "saved", { verifiedAt: result.committedAt, conflicts: result.conflicts?.length || 0 });
+          if (result.conflicts?.length) window.dispatchEvent(new CustomEvent("easynote:sync-conflict", { detail: { conflicts: result.conflicts } }));
+          if (result.totalChanges || result.conflicts?.length || result.reason === "danger") this.broadcastCommit(result);
           waiters.forEach((resolve) => resolve(true));
         } catch (error) {
           console.error("EasyNote verified save failed", error);

@@ -242,7 +242,7 @@ export const useProductivityStore = defineStore("productivity", () => {
     if (!state.value) return;
     if (activeSessionRecord()) throw new Error("已有正在进行的计时，请先完成或放弃");
     const start = Date.now();
-    const session: FocusSession = { id: makeId("focus"), label: label.trim() || "专注", taskId, scheduleEntryId, phase: "focus", status: "active", focusMinutes: Math.max(1, focusMinutes), breakMinutes: Math.max(1, breakMinutes), startedAt: new Date(start).toISOString(), phaseStartedAt: new Date(start).toISOString(), endsAt: new Date(start + Math.max(1, focusMinutes) * 60_000).toISOString(), pausedAt: null, remainingMs: Math.max(1, focusMinutes) * 60_000, actualSeconds: 0, completedAt: null, updatedAt: nowIso() } as FocusSession;
+    const session: FocusSession = { id: makeId("focus"), label: label.trim() || "专注", taskId, scheduleEntryId, phase: "focus", status: "active", focusMinutes: Math.max(1, focusMinutes), breakMinutes: Math.max(1, breakMinutes), startedAt: new Date(start).toISOString(), phaseStartedAt: new Date(start).toISOString(), endsAt: new Date(start + Math.max(1, focusMinutes) * 60_000).toISOString(), pausedAt: null, remainingMs: Math.max(1, focusMinutes) * 60_000, actualSeconds: 0, focusCompletedAt: null, completedAt: null, updatedAt: nowIso() } as FocusSession;
     state.value.focusSessions.push(session);
     settings.value.focusMinutes = session.focusMinutes; settings.value.breakMinutes = session.breakMinutes; saveSettings(settings.value);
     await persist("manual");
@@ -269,8 +269,12 @@ export const useProductivityStore = defineStore("productivity", () => {
   async function finishTimer(abandoned = false): Promise<void> {
     const session = activeSessionRecord();
     if (!session) return;
-    if (session.status === "active" && session.phase === "focus") session.actualSeconds += Math.max(0, Math.round((Date.now() - new Date(session.phaseStartedAt || session.startedAt).getTime()) / 1000));
-    session.status = abandoned ? "abandoned" : "completed"; session.completedAt = nowIso(); session.remainingMs = 0; session.updatedAt = nowIso();
+    const stamp = nowIso();
+    if (session.phase === "focus") {
+      if (session.status === "active") session.actualSeconds += Math.max(0, Math.round((Math.min(Date.now(), new Date(session.endsAt).getTime()) - new Date(session.phaseStartedAt || session.startedAt).getTime()) / 1000));
+      session.focusCompletedAt ||= stamp;
+    }
+    session.status = abandoned ? "abandoned" : "completed"; session.completedAt = stamp; session.remainingMs = 0; session.updatedAt = stamp;
     await persist("manual");
   }
 
@@ -310,8 +314,9 @@ export const useProductivityStore = defineStore("productivity", () => {
     const session = activeSessionRecord();
     if (!session || session.status !== "active" || remainingMs.value > 0) return;
     if (session.phase === "focus") {
+      const stamp = nowIso();
       session.actualSeconds += Math.max(0, Math.round((Math.min(Date.now(), new Date(session.endsAt).getTime()) - new Date(session.phaseStartedAt || session.startedAt).getTime()) / 1000));
-      session.phase = "awaitingBreak"; session.status = "paused"; session.remainingMs = 0; session.pausedAt = nowIso(); session.updatedAt = nowIso();
+      session.phase = "awaitingBreak"; session.status = "paused"; session.remainingMs = 0; session.focusCompletedAt = stamp; session.pausedAt = stamp; session.updatedAt = stamp;
       notifyTimer(session);
     } else {
       session.status = "completed"; session.completedAt = nowIso(); session.remainingMs = 0; session.updatedAt = nowIso();
@@ -360,6 +365,15 @@ export const useProductivityStore = defineStore("productivity", () => {
     await persist("manual");
   }
 
+  async function deleteMilestone(id: string): Promise<void> {
+    if (!state.value) return;
+    const item = state.value.milestones.find((entry) => entry.id === id);
+    if (!item || item.deletedAt) return;
+    await easyNoteRuntime.value?.safety.recordRecovery("milestone-delete", `删除里程碑“${item.title}”`, { milestone: { ...item } });
+    item.deletedAt = nowIso(); item.updatedAt = nowIso();
+    await persist("danger");
+  }
+
   async function archiveGoal(id: string, deleted = false): Promise<void> {
     const goal = goals.value.find((item) => item.id === id);
     if (!goal) return;
@@ -386,7 +400,7 @@ export const useProductivityStore = defineStore("productivity", () => {
   function openNote(id: string): void { easyNoteRuntime.value?.openNote(id); }
   function refresh(): void { touch(); }
 
-  return { state, tasks, notes, schedules, series, reviews, goals, milestones, sessions, activeSession, remainingMs, settings, taskTitle, taskDone, entriesOn, saveSchedule, deleteSchedule, toggleSchedule, saveSeries, deleteSeries, startFocus, pauseTimer, resumeTimer, finishTimer, startBreak, markLinkedComplete, tickTimer, reviewFor, saveReview, periodRange, metricsBetween, saveGoal, saveMilestone, archiveGoal, goalProgress, openTask, openNote, refresh, persist, toast };
+  return { state, tasks, notes, schedules, series, reviews, goals, milestones, sessions, activeSession, remainingMs, settings, taskTitle, taskDone, entriesOn, saveSchedule, deleteSchedule, toggleSchedule, saveSeries, deleteSeries, startFocus, pauseTimer, resumeTimer, finishTimer, startBreak, markLinkedComplete, tickTimer, reviewFor, saveReview, periodRange, metricsBetween, saveGoal, saveMilestone, deleteMilestone, archiveGoal, goalProgress, openTask, openNote, refresh, persist, toast };
 });
 
 interface ProductivitySettings { focusMinutes: number; breakMinutes: number; customQuotes: string[]; quoteHidden: boolean }

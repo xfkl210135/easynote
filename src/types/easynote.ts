@@ -131,6 +131,7 @@ export interface FocusSession {
   pausedAt: ISODateString | null;
   remainingMs: number;
   actualSeconds: number;
+  focusCompletedAt?: ISODateString | null;
   completedAt: ISODateString | null;
   updatedAt: ISODateString;
   revision?: number;

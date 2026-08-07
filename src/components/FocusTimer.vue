@@ -1,12 +1,20 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from "vue";
+import { useRouter } from "vue-router";
 import { useProductivityStore } from "../stores/productivity";
 
+interface DocumentPictureInPictureController {
+  requestWindow(options?: { width?: number; height?: number; disallowReturnToOpener?: boolean }): Promise<Window>;
+}
+
 const store = useProductivityStore();
+const router = useRouter();
 const open = ref(false);
 const expanded = ref(true);
 const error = ref("");
 const actionBusy = ref(false);
+const pipWindow = shallowRef<Window | null>(null);
+const pipMount = shallowRef<HTMLElement | null>(null);
 const form = reactive({ label: "", taskId: "", scheduleEntryId: "", focusMinutes: store.settings.focusMinutes, breakMinutes: store.settings.breakMinutes });
 
 const active = computed(() => store.activeSession);
@@ -18,6 +26,87 @@ const timeLabel = computed(() => {
   const seconds = Math.ceil(store.remainingMs / 1000);
   return `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
 });
+const progressPercent = computed(() => {
+  const session = active.value;
+  if (!session) return 0;
+  if (session.phase === "awaitingBreak") return 100;
+  const plannedMinutes = session.phase === "break" ? session.breakMinutes : session.focusMinutes;
+  const plannedMs = Math.max(1, plannedMinutes * 60_000);
+  return Math.max(0, Math.min(100, ((plannedMs - store.remainingMs) / plannedMs) * 100));
+});
+
+const pipStyles = `
+  :root { color-scheme: light; font-family: Inter, "Microsoft YaHei", "Segoe UI", sans-serif; }
+  :root[data-theme="dark"] { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-width: 260px; min-height: 170px; overflow: hidden; background: #f5f7fb; }
+  .focus-pip-card { width: 100vw; min-height: 100vh; display: flex; flex-direction: column; gap: 12px; padding: 17px 18px 15px; color: #172033; background: linear-gradient(145deg,#f8faff 0%,#eef3ff 100%); }
+  .focus-pip-heading { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+  .focus-pip-status { display: flex; align-items: center; gap: 7px; color: #3674eb; font-size: 13px; font-weight: 700; }
+  .focus-pip-status::before { width: 7px; height: 7px; border-radius: 50%; background: #3674eb; box-shadow: 0 0 0 4px rgba(54,116,235,.12); content: ""; }
+  .focus-pip-time { color: #111a2e; font-size: clamp(34px,16vw,48px); font-weight: 780; line-height: 1; letter-spacing: 1px; font-variant-numeric: tabular-nums; }
+  .focus-pip-label { min-height: 21px; overflow: hidden; color: #69758c; font-size: 15px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+  .focus-pip-progress { height: 5px; overflow: hidden; border-radius: 999px; background: rgba(54,116,235,.14); }
+  .focus-pip-progress > i { display: block; width: var(--progress); height: 100%; border-radius: inherit; background: linear-gradient(90deg,#4d82f4,#7b68ee); transition: width .25s linear; }
+  .focus-pip-actions { display: flex; gap: 8px; margin-top: auto; }
+  .focus-pip-actions button { min-width: 0; min-height: 38px; flex: 1; padding: 0 10px; border: 1px solid #dbe2f0; border-radius: 9px; color: #344057; background: rgba(255,255,255,.9); font: inherit; font-size: 12px; font-weight: 650; cursor: pointer; }
+  .focus-pip-actions button:hover { border-color: #76a0f5; color: #2868e8; background: #fff; }
+  .focus-pip-actions button.primary { border-color: #3674eb; color: #fff; background: #3674eb; }
+  .focus-pip-actions button.danger { color: #d44d5c; }
+  .focus-pip-actions button:disabled { opacity: .55; cursor: wait; }
+  :root[data-theme="dark"] body { background: #101522; }
+  :root[data-theme="dark"] .focus-pip-card { color: #e8edf8; background: linear-gradient(145deg,#1c2434 0%,#141b29 100%); }
+  :root[data-theme="dark"] .focus-pip-time { color: #f4f7ff; }
+  :root[data-theme="dark"] .focus-pip-label { color: #9ca8bd; }
+  :root[data-theme="dark"] .focus-pip-actions button { border-color: #364158; color: #d7deeb; background: #252e40; }
+  :root[data-theme="dark"] .focus-pip-actions button:hover { border-color: #6894ed; color: #8db1fa; background: #2b3549; }
+  :root[data-theme="dark"] .focus-pip-actions button.primary { color: white; background: #4079e6; }
+  :root[data-theme="dark"] .focus-pip-actions button.danger { color: #ff8b97; }
+`;
+
+function pictureInPictureController(): DocumentPictureInPictureController | null {
+  return (window as Window & { documentPictureInPicture?: DocumentPictureInPictureController }).documentPictureInPicture || null;
+}
+
+let pipTimer = 0;
+function closePictureInPicture() {
+  const current = pipWindow.value;
+  if (current && pipTimer) current.clearInterval(pipTimer);
+  pipTimer = 0;
+  pipMount.value = null;
+  pipWindow.value = null;
+  if (current && !current.closed) current.close();
+}
+
+async function openPictureInPicture() {
+  const current = pipWindow.value;
+  if (current && !current.closed) { current.focus(); return; }
+  if (!active.value) return;
+  const controller = pictureInPictureController();
+  if (!controller) {
+    store.toast("当前浏览器不支持悬浮计时器，请使用最新版 Chrome 或 Edge");
+    return;
+  }
+  try {
+    const floatingWindow = await controller.requestWindow({ width: 340, height: 230, disallowReturnToOpener: false });
+    floatingWindow.document.title = `专注 · ${active.value.label}`;
+    floatingWindow.document.documentElement.dataset.theme = document.documentElement.dataset.theme || "light";
+    const style = floatingWindow.document.createElement("style");
+    style.textContent = pipStyles;
+    const mount = floatingWindow.document.createElement("div");
+    mount.id = "focusPictureInPictureMount";
+    floatingWindow.document.head.append(style);
+    floatingWindow.document.body.append(mount);
+    pipWindow.value = floatingWindow;
+    pipMount.value = mount;
+    pipTimer = floatingWindow.setInterval(() => { void store.tickTimer(); }, 1000);
+    floatingWindow.addEventListener("pagehide", () => {
+      if (pipWindow.value === floatingWindow) { pipTimer = 0; pipMount.value = null; pipWindow.value = null; }
+    }, { once: true });
+  } catch (cause) {
+    if ((cause as DOMException | undefined)?.name !== "NotAllowedError") store.toast("悬浮计时器打开失败，请稍后重试");
+  }
+}
 
 let timer = 0;
 function showStarter(initial: { label?: string; taskId?: string; scheduleEntryId?: string } = {}) {
@@ -62,13 +151,35 @@ const resume = () => runTimerAction(() => store.resumeTimer());
 const beginBreak = () => runTimerAction(() => store.startBreak());
 const finish = () => runTimerAction(() => store.finishTimer(false));
 const abandon = () => runTimerAction(() => store.finishTimer(true));
+function openFocusHistory() { void router.push("/schedule/focus"); window.focus(); }
+
+let originalTitle = "EasyNote";
+let themeObserver: MutationObserver | null = null;
+watch([active, timeLabel], () => {
+  const session = active.value;
+  document.title = session ? `${timeLabel.value} · ${session.label} | EasyNote` : originalTitle;
+  const floatingWindow = pipWindow.value;
+  if (session && floatingWindow && !floatingWindow.closed) floatingWindow.document.title = `${timeLabel.value} · ${session.label}`;
+  if (!session && floatingWindow) closePictureInPicture();
+});
 
 onMounted(() => {
+  originalTitle = document.title;
   window.addEventListener("easynote:start-focus", onStartRequest);
   timer = window.setInterval(() => { void store.tickTimer(); }, 1000);
+  themeObserver = new MutationObserver(() => {
+    if (pipWindow.value && !pipWindow.value.closed) pipWindow.value.document.documentElement.dataset.theme = document.documentElement.dataset.theme || "light";
+  });
+  themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
   void store.tickTimer();
 });
-onBeforeUnmount(() => { window.removeEventListener("easynote:start-focus", onStartRequest); window.clearInterval(timer); });
+onBeforeUnmount(() => {
+  window.removeEventListener("easynote:start-focus", onStartRequest);
+  window.clearInterval(timer);
+  themeObserver?.disconnect();
+  document.title = originalTitle;
+  closePictureInPicture();
+});
 </script>
 
 <template>
@@ -78,6 +189,8 @@ onBeforeUnmount(() => { window.removeEventListener("easynote:start-focus", onSta
         <span>{{ phaseLabel }}</span><strong>{{ timeLabel }}</strong><small>{{ active.label }}</small>
       </button>
       <div v-if="expanded" class="focus-mini-actions">
+        <button type="button" class="focus-pip-button" :disabled="actionBusy" @click="openPictureInPicture">{{ pipWindow ? '悬浮窗已打开' : '悬浮到桌面' }}</button>
+        <button type="button" @click="openFocusHistory">查看记录</button>
         <template v-if="active.phase === 'awaitingBreak'">
           <button type="button" class="focus-break-button" :disabled="actionBusy" @click="beginBreak">开始休息 {{ active.breakMinutes }} 分钟</button>
           <button v-if="active.taskId || active.scheduleEntryId" type="button" :disabled="actionBusy" @click="store.markLinkedComplete(active.id)">标记关联完成</button>
@@ -93,6 +206,30 @@ onBeforeUnmount(() => { window.removeEventListener("easynote:start-focus", onSta
     </template>
     <button v-else class="focus-start-button" type="button" @click="showStarter()"><span>◷</span> 开始专注</button>
   </aside>
+
+  <Teleport v-if="pipMount && active" :to="pipMount">
+    <main class="focus-pip-card" aria-live="polite">
+      <div class="focus-pip-heading">
+        <span class="focus-pip-status">{{ phaseLabel }}</span>
+        <strong class="focus-pip-time">{{ timeLabel }}</strong>
+      </div>
+      <div class="focus-pip-label" :title="active.label">{{ active.label }}</div>
+      <div class="focus-pip-progress" aria-hidden="true"><i :style="{ '--progress': `${progressPercent}%` }"></i></div>
+      <div class="focus-pip-actions">
+        <template v-if="active.phase === 'awaitingBreak'">
+          <button class="primary" type="button" :disabled="actionBusy" @click="beginBreak">开始休息</button>
+          <button v-if="active.taskId || active.scheduleEntryId" type="button" :disabled="actionBusy" @click="store.markLinkedComplete(active.id)">关联完成</button>
+          <button type="button" :disabled="actionBusy" @click="finish">结束本轮</button>
+        </template>
+        <template v-else>
+          <button v-if="active.status === 'active'" class="primary" type="button" :disabled="actionBusy" @click="pause">暂停</button>
+          <button v-else class="primary" type="button" :disabled="actionBusy" @click="resume">继续</button>
+          <button type="button" :disabled="actionBusy" @click="finish">提前完成</button>
+          <button class="danger" type="button" :disabled="actionBusy" @click="abandon">放弃</button>
+        </template>
+      </div>
+    </main>
+  </Teleport>
 
   <div v-if="open" class="productivity-modal-backdrop" @click.self="open = false">
     <form class="productivity-modal focus-start-modal" @submit.prevent="start">

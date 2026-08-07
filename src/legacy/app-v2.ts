@@ -71,6 +71,9 @@ import { installEasyNoteRuntime, VueScheduleAdapter } from "../services/legacy-r
   let db = null;
   let safety = null;
   let storageMode = "indexeddb";
+  let externalSyncTimer = 0;
+  let pendingExternalCommit = null;
+  let applyingExternalCommit = false;
   let activeView = "all";
   let activeNoteId = null;
   let activeFileId = null;
@@ -192,6 +195,58 @@ import { installEasyNoteRuntime, VueScheduleAdapter } from "../services/legacy-r
     if (!safety) return Promise.resolve(false);
     return safety.queueSave(state, immediate, reason);
   }
+
+  function mergeCommitDetails(current, next) {
+    const merged = { ...(current || {}), ...(next || {}) };
+    for (const key of ["changedNoteIds", "changedTaskIds", "changedScheduleIds", "changedWhiteboardIds"]) merged[key] = [...new Set([...(current?.[key] || []), ...(next?.[key] || [])])];
+    return merged;
+  }
+
+  function queueExternalCommit(event) {
+    pendingExternalCommit = mergeCommitDetails(pendingExternalCommit, event.detail || {});
+    clearTimeout(externalSyncTimer);
+    externalSyncTimer = setTimeout(applyExternalCommit, 220);
+  }
+
+  async function applyExternalCommit() {
+    if (!safety || applyingExternalCommit || !pendingExternalCommit) return;
+    if (document.hidden || safety.hasPendingWrites()) { clearTimeout(externalSyncTimer); externalSyncTimer = setTimeout(applyExternalCommit, 600); return; }
+    applyingExternalCommit = true;
+    const detail = pendingExternalCommit;
+    try {
+      const freshRaw = await safety.load(false);
+      if (!freshRaw || safety.hasPendingWrites()) { clearTimeout(externalSyncTimer); externalSyncTimer = setTimeout(applyExternalCommit, 600); return; }
+      pendingExternalCommit = null;
+      const fresh = normalizeData(freshRaw);
+      const previousActiveId = activeNoteId;
+      const activeChanged = Boolean(previousActiveId && (detail.changedNoteIds || []).includes(previousActiveId));
+      Object.assign(state, fresh);
+      safety.captureStateBaselines(state);
+      const activeMissing = Boolean(previousActiveId && !getNote(previousActiveId));
+      if (activeMissing) activeNoteId = getVisibleNotes()[0]?.id || null;
+      taskManager?.render(); scheduleManager?.render(); whiteboardManager?.render(); renderSidebar(); renderList();
+      if (activeChanged || activeMissing || !getActiveNote()) renderEditor();
+      if (activeChanged) showToast("当前笔记已从另一个页面同步到最新版本");
+    } catch (error) {
+      console.error("EasyNote cross-tab refresh failed", error);
+      showToast("其他页面有新修改，自动同步失败，请刷新当前页面");
+    } finally { applyingExternalCommit = false; }
+  }
+
+  function applySyncConflicts(event) {
+    const conflicts = event.detail?.conflicts || [];
+    for (const conflict of conflicts.filter((item) => item.kind === "note" && item.copy)) {
+      const index = state.notes.findIndex((note) => note.id === conflict.originalId);
+      if (index >= 0) conflict.remote ? state.notes.splice(index, 1, conflict.remote) : state.notes.splice(index, 1);
+      if (!state.notes.some((note) => note.id === conflict.copy.id)) state.notes.unshift(conflict.copy);
+      if (activeNoteId === conflict.originalId) activeNoteId = conflict.copy.id;
+    }
+    render();
+    showToast(conflicts.some((item) => item.kind === "note") ? "检测到同一笔记被多个页面修改，本页内容已保存为冲突副本" : "检测到多页面修改冲突，本页版本已放入数据安全恢复记录");
+  }
+
+  window.addEventListener("easynote:external-commit", queueExternalCommit);
+  window.addEventListener("easynote:sync-conflict", applySyncConflicts);
 
   async function ensureVueMigrationRecovery() {
     if (!document.querySelector("#vue-shell-root") || !safety) return;
