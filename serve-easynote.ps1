@@ -8,22 +8,32 @@ $SourceRoot = [IO.Path]::GetFullPath($PSScriptRoot)
 $AppRoot = Join-Path $SourceRoot "dist"
 $BuiltIndex = Join-Path $AppRoot "index.html"
 
-if (-not (Test-Path -LiteralPath $BuiltIndex)) {
-  $Npm = Get-Command npm.cmd -ErrorAction SilentlyContinue
-  if (-not $Npm) {
-    Write-Host "EasyNote production files are missing and npm is not installed." -ForegroundColor Red
-    Write-Host "Install Node.js, then run: npm install && npm run build"
-    exit 1
+function Ensure-ProductionBuild {
+  $needsBuild = -not (Test-Path -LiteralPath $BuiltIndex)
+  if (-not $needsBuild) {
+    $sourceFiles = @(Get-ChildItem -LiteralPath (Join-Path $SourceRoot "src"), (Join-Path $SourceRoot "index.html"), (Join-Path $SourceRoot "styles.css"), (Join-Path $SourceRoot "vite.config.ts") -Recurse -File -ErrorAction SilentlyContinue)
+    $newestSource = $sourceFiles | Sort-Object LastWriteTimeUtc | Select-Object -Last 1
+    $needsBuild = $newestSource -and $newestSource.LastWriteTimeUtc -gt (Get-Item -LiteralPath $BuiltIndex).LastWriteTimeUtc
   }
-  Write-Host "Preparing the EasyNote production build..." -ForegroundColor Cyan
-  Push-Location $SourceRoot
-  try {
-    & $Npm.Source run build
-    if ($LASTEXITCODE -ne 0) { throw "EasyNote build failed with exit code $LASTEXITCODE" }
-  } finally {
-    Pop-Location
+  if ($needsBuild) {
+    $Npm = Get-Command npm.cmd -ErrorAction SilentlyContinue
+    if (-not $Npm) {
+      Write-Host "EasyNote production files are missing and npm is not installed." -ForegroundColor Red
+      Write-Host "Install Node.js, then run: npm install && npm run build"
+      exit 1
+    }
+    Write-Host "Preparing the EasyNote production build..." -ForegroundColor Cyan
+    Push-Location $SourceRoot
+    try {
+      & $Npm.Source run build
+      if ($LASTEXITCODE -ne 0) { throw "EasyNote build failed with exit code $LASTEXITCODE" }
+    } finally {
+      Pop-Location
+    }
   }
 }
+
+Ensure-ProductionBuild
 
 $AppRoot = [IO.Path]::GetFullPath($AppRoot)
 $RootPrefix = $AppRoot.TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
@@ -53,7 +63,8 @@ if (Test-EasyNoteServer) {
 
 $ServerSource = Join-Path $SourceRoot "EasyNoteStaticServer.cs"
 Add-Type -Path $ServerSource
-$Server = New-Object EasyNoteStaticServer($AppRoot, $Port)
+$AutomaticBackupRoot = Join-Path $SourceRoot "EasyNote-Backups\automatic"
+$Server = New-Object EasyNoteStaticServer($AppRoot, $AutomaticBackupRoot, $Port)
 try {
   $Server.Start()
 } catch {
@@ -69,7 +80,8 @@ try {
 Write-Host ""
 Write-Host "EasyNote local safety server is running" -ForegroundColor Green
 Write-Host "Address: $Url"
-Write-Host "Close this window to stop the server. Verified notes remain in browser storage and your backup directory."
+Write-Host "Automatic disk backups: $AutomaticBackupRoot"
+Write-Host "Close this window to stop the server. Verified notes remain in browser storage and automatic disk backups."
 Write-Host ""
 if (-not $NoBrowser) { Start-Process $Url }
 

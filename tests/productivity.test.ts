@@ -12,7 +12,7 @@ function emptyState(): AppState {
 
 function mountStore(state = emptyState()) {
   setActivePinia(createPinia());
-  installEasyNoteRuntime({ state, safety: { recordRecovery: vi.fn().mockResolvedValue({}) }, persist: vi.fn().mockResolvedValue(true), toast: vi.fn(), openTask: vi.fn(), openNote: vi.fn() });
+  installEasyNoteRuntime({ state, safety: { recordRecovery: vi.fn().mockResolvedValue({}), putAttachment: vi.fn(), getAttachmentUrl: vi.fn(), getAttachmentIdByUrl: vi.fn(), getHistory: vi.fn().mockResolvedValue([]), getHistorySnapshot: vi.fn().mockResolvedValue(null) }, persist: vi.fn().mockResolvedValue(true), toast: vi.fn(), openTask: vi.fn(), openNote: vi.fn(), getActiveNoteId: vi.fn().mockReturnValue(null) });
   return useProductivityStore();
 }
 
@@ -92,5 +92,50 @@ describe("focus, reviews and goal calculations", () => {
     await store.saveMilestone({ goalId: goal!.id, title: "任务里程碑", weight: 2, taskIds: ["done-task", "todo-task"] });
     await store.saveMilestone({ goalId: goal!.id, title: "完成里程碑", weight: 1, taskIds: [], completed: true });
     expect(store.goalProgress(goal!)).toBe(67);
+  });
+});
+
+describe("schedule time slots", () => {
+  afterEach(() => { easyNoteRuntime.value = null; });
+
+  it("persists every time slot while retaining the first slot in legacy fields", async () => {
+    const state = emptyState();
+    const store = mountStore(state);
+
+    await store.saveSchedule({
+      title: "分段课程",
+      date: "2026-08-21",
+      allDay: false,
+      timeSlots: [
+        { startTime: "09:00", endTime: "10:00" },
+        { startTime: "14:00", endTime: "15:30" },
+      ],
+    });
+
+    expect(state.scheduleEntries[0]).toMatchObject({
+      startTime: "09:00",
+      endTime: "10:00",
+      timeSlots: [
+        { startTime: "09:00", endTime: "10:00" },
+        { startTime: "14:00", endTime: "15:30" },
+      ],
+    });
+  });
+
+  it("upgrades legacy fixed schedules to one time slot when they are saved", async () => {
+    const state = emptyState();
+    const store = mountStore(state);
+
+    await store.saveSeries({
+      title: "旧固定日程",
+      startDate: "2026-08-21",
+      allDay: false,
+      startTime: "08:30",
+      endTime: "09:15",
+      recurrenceType: "daily",
+      recurrenceInterval: 1,
+    });
+
+    expect(state.scheduleSeries[0].timeSlots).toEqual([{ startTime: "08:30", endTime: "09:15" }]);
   });
 });

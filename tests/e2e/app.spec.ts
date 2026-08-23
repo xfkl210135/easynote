@@ -15,6 +15,7 @@ test.beforeEach(async ({ page }, testInfo) => {
   await expect(page.locator("#workspace")).toBeVisible();
   await expect(page.locator("#saveIndicator")).not.toHaveClass(/failed/);
   await page.waitForTimeout(450);
+  await page.locator("#safetyBackdrop").waitFor({ state: "visible", timeout: 1_500 }).catch(() => undefined);
   if (await page.locator("#safetyBackdrop").isVisible()) await page.locator("#safetyClose").click();
 });
 
@@ -24,6 +25,165 @@ test("loads the existing desktop experience", async ({ page }, testInfo) => {
   if (testInfo.project.name === "desktop-chromium") {
     await expect(page.locator(".mobile-bottom-nav")).toBeHidden();
   }
+});
+
+test("inserts editable Mermaid source before rendering in both note editors", async ({ page, context }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop-chromium", "Mermaid context-menu workflow runs once on desktop");
+
+  await page.locator("#newNoteTop").click();
+  const mainEditor = page.locator("#contentEditor");
+  await mainEditor.click({ button: "right", position: { x: 80, y: 80 } });
+  await page.locator("#contextMenu .context-item", { hasText: "插入 Mermaid 流程图" }).click();
+
+  const mainSource = mainEditor.locator('pre[data-code-language="mermaid"]');
+  await expect(mainSource).toBeVisible();
+  await expect(mainEditor.locator(".mermaid-diagram")).toHaveCount(0);
+  await mainSource.fill("flowchart LR\nA[输入源码] --> B[手动渲染]");
+  await mainSource.click({ button: "right" });
+  await page.locator("#contextMenu .context-item", { hasText: "渲染 Mermaid 图表" }).click();
+
+  const mainDiagram = mainEditor.locator(".mermaid-diagram");
+  await expect(mainDiagram.locator("svg")).toBeVisible();
+  expect(await mainDiagram.evaluate((diagram) => {
+    const svg = diagram.querySelector("svg")!;
+    return svg.getBoundingClientRect().width <= diagram.getBoundingClientRect().width + 1;
+  })).toBe(true);
+  await mainDiagram.locator("svg").click({ button: "right" });
+  await page.locator("#contextMenu .context-item", { hasText: "编辑 Mermaid 源码" }).click();
+  await expect(mainSource).toContainText("输入源码");
+
+  const floatingPagePromise = context.waitForEvent("page");
+  await page.locator("#floatingNotesButton").click();
+  const floating = await floatingPagePromise;
+  const floatingEditor = floating.locator(".floating-content-editor");
+  await expect(floatingEditor).toBeVisible();
+  await floatingEditor.click({ button: "right", position: { x: 80, y: 80 } });
+  await floating.getByRole("button", { name: "插入 Mermaid 流程图", exact: true }).click();
+
+  const floatingSource = floatingEditor.locator('pre[data-code-language="mermaid"]').last();
+  await expect(floatingSource).toBeVisible();
+  await expect(floatingEditor.locator(".mermaid-diagram")).toHaveCount(0);
+  await floatingSource.fill("flowchart TD\nA[悬浮窗编辑] --> B[悬浮窗渲染]");
+  await floatingSource.click({ button: "right" });
+  await floating.getByRole("button", { name: "渲染 Mermaid 图表", exact: true }).click();
+
+  const floatingDiagram = floatingEditor.locator(".mermaid-diagram");
+  await expect(floatingDiagram.locator("svg")).toBeVisible();
+  expect(await floatingDiagram.evaluate((diagram) => {
+    const svg = diagram.querySelector("svg")!;
+    return svg.getBoundingClientRect().width <= diagram.getBoundingClientRect().width + 1;
+  })).toBe(true);
+  await floatingDiagram.locator("svg").click({ button: "right" });
+  await floating.getByRole("button", { name: "编辑 Mermaid 源码", exact: true }).click();
+  await expect(floatingSource).toContainText("悬浮窗编辑");
+});
+
+test("retries the current page after a verified save failure", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop-chromium", "save recovery regression runs once on desktop");
+  const title = `保存恢复验证-${Date.now()}`;
+  await page.locator("#newNoteTop").click();
+  await page.evaluate((failedTitle) => {
+    const original = IDBObjectStore.prototype.put;
+    IDBObjectStore.prototype.put = function (value: any, key?: IDBValidKey) {
+      if (this.name === "notes" && value?.title === failedTitle) {
+        IDBObjectStore.prototype.put = original;
+        throw new DOMException("simulated write failure", "UnknownError");
+      }
+      return key === undefined ? original.call(this, value) : original.call(this, value, key);
+    };
+  }, title);
+  await page.locator("#titleInput").fill(title);
+  await expect(page.locator("#saveIndicator")).toHaveClass(/failed/, { timeout: 10_000 });
+
+  await page.locator("#saveIndicator").click();
+  await expect(page.locator("#safetyBackdrop")).toBeVisible();
+  await expect(page.locator("#retrySaveButton")).toBeEnabled();
+  await page.locator("#retrySaveButton").click();
+  await expect(page.locator("#saveIndicator")).toHaveClass(/verified/, { timeout: 20_000 });
+  await expect(page.locator("#toast")).toHaveText("当前页面已重新保存并通过校验");
+  await expect(page.locator("#retrySaveButton")).toBeDisabled();
+
+  await page.locator("#safetyClose").click();
+  await page.reload();
+  await expect(page.locator("#noteList .note-card").filter({ hasText: title })).toBeVisible();
+});
+
+test("opens the backup directory picker before starting a save", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop-chromium", "directory picker regression runs once on desktop");
+  await page.evaluate(() => {
+    (window as any).__pickerSaveStatus = "";
+    (window as any).showDirectoryPicker = () => {
+      (window as any).__pickerSaveStatus = document.querySelector("#saveIndicator")?.textContent || "";
+      return Promise.reject(new DOMException("test cancellation", "AbortError"));
+    };
+  });
+  await page.locator("#safetyCenterButton").click();
+  await expect(page.locator("#safetyBackdrop")).toBeVisible();
+  await page.locator("#chooseBackupDirectoryButton").click();
+  await expect.poll(() => page.evaluate(() => (window as any).__pickerSaveStatus)).toContain("已验证保存");
+});
+
+test("edits and safely saves a full note inside the always-on-top companion window", async ({ page, context }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop-chromium", "Document Picture-in-Picture is a desktop Chromium feature");
+  const floatingPagePromise = context.waitForEvent("page");
+  await page.locator("#floatingNotesButton").click();
+  const floating = await floatingPagePromise;
+  floating.on("pageerror", (error) => console.error(`[floating-pageerror] ${error.message}`));
+  await expect(floating.locator(".floating-note-workspace")).toBeVisible();
+  await expect(page.locator("#editorPanel")).toHaveClass(/floating-note-locked/);
+
+  const listLayoutToggle = floating.locator(".floating-layout-toggle").last();
+  await listLayoutToggle.click();
+  await expect(floating.locator(".floating-note-workspace")).toHaveClass(/list-hidden/);
+  await expect(floating.locator(".floating-note-list-panel")).toBeHidden();
+  await expect(floating.locator(".floating-editor-new-note")).toBeVisible();
+  await floating.locator(".floating-editor-new-note").click();
+  await floating.locator(".floating-list-toggle").click();
+  await expect(floating.locator(".floating-note-list-panel")).toBeVisible();
+  await expect.poll(() => floating.evaluate(() => localStorage.getItem("easynote-floating-list-visible"))).toBe("true");
+  await expect(floating.getByLabel("切换具体笔记")).toBeVisible();
+  await floating.getByLabel("切换具体笔记").click();
+  await expect(floating.locator(".floating-note-picker-popover")).toBeVisible();
+  await expect(floating.locator(".floating-note-tree-folder").first()).toBeVisible();
+  const title = `悬浮窗口笔记-${Date.now()}`;
+  await floating.locator(".floating-title-input").fill(title);
+  await floating.locator(".floating-content-editor").fill("在其他网页上方完成的完整笔记正文");
+  const floatingEditor = floating.locator(".floating-content-editor");
+  await expect.poll(() => floatingEditor.evaluate((root) => root.lastElementChild?.tagName === "P" && !(root.lastElementChild.textContent || "").trim())).toBe(true);
+  const editorBox = await floatingEditor.boundingBox();
+  if (editorBox) await floatingEditor.click({ position: { x: Math.min(120, editorBox.width - 10), y: editorBox.height - 8 } });
+  await expect.poll(() => floatingEditor.evaluate((root) => {
+    const selection = root.ownerDocument.getSelection();
+    return Boolean(selection?.anchorNode && root.lastElementChild?.contains(selection.anchorNode));
+  })).toBe(true);
+  await floatingEditor.evaluate((root) => {
+    root.insertAdjacentHTML("beforeend", "<pre>block-preserved-text</pre>");
+    root.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText" }));
+  });
+  await floatingEditor.locator("pre").click({ button: "right" });
+  await expect(floating.locator(".floating-editor-context-menu")).toBeVisible();
+  await floating.locator(".floating-editor-context-menu button").filter({ hasText: /保留文字/ }).click();
+  await expect(floatingEditor.locator("pre")).toHaveCount(0);
+  await expect(floatingEditor).toContainText("block-preserved-text");
+  await floating.locator('.floating-format-toolbar input[type="file"]').setInputFiles({
+    name: "floating-note.png", mimeType: "image/png", buffer: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64"),
+  });
+  await expect.poll(() => floating.locator(".floating-content-editor img").evaluate((image: HTMLImageElement) => image.naturalWidth > 0)).toBe(true);
+  expect(await floating.locator(".floating-content-editor").innerHTML()).toContain("data-attachment-id");
+  await floating.keyboard.press("Control+s");
+  await expect(floating.locator(".floating-save-status")).toHaveText("已验证保存", { timeout: 15_000 });
+  await floating.getByTitle("关闭悬浮窗口").click();
+  await expect(page.locator("#editorPanel")).not.toHaveClass(/floating-note-locked/);
+
+  await page.locator("#searchInput").fill(title);
+  await expect(page.locator("#noteList")).toContainText(title);
+  await page.reload();
+  await page.locator("#searchInput").fill(title);
+  await expect(page.locator("#noteList")).toContainText(title);
+  await page.locator("#noteList .note-card").filter({ hasText: title }).click();
+  await expect(page.locator("#titleInput")).toHaveValue(title);
+  expect(await page.locator("#contentEditor").innerHTML()).toContain("data-attachment-id");
+  await expect.poll(() => page.locator("#contentEditor img").evaluate((image: HTMLImageElement) => image.naturalWidth > 0)).toBe(true);
 });
 
 test("mobile navigation opens every workspace", async ({ page }, testInfo) => {
@@ -63,6 +223,60 @@ test("core note, task, schedule and whiteboard actions remain available", async 
   await page.locator("#whiteboardNavButton").click();
   await page.locator('[data-whiteboard-add="text"]').click();
   await expect(page.locator("[data-whiteboard-node]")).toHaveCount(1);
+});
+
+test("imports a portable v8 backup through the Vue schedule adapter and restores inline attachments", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop-chromium", "portable import regression runs once on desktop");
+  const portable = {
+    format: "easynote-portable", version: 8, exportedAt: new Date().toISOString(),
+    categories: [{ id: "recovered", name: "恢复", color: "#4f7df3", parentId: null }],
+    files: [],
+    notes: [{
+      id: "recovered-note", title: "便携备份恢复验证", categoryId: "recovered", tags: [], favorite: false,
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), deletedAt: null,
+      content: '<p>恢复正文</p><img data-attachment-id="old-device-id" alt="恢复图片" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=">',
+    }],
+    tasks: [], taskFields: [], taskViews: [], scheduleEntries: [], scheduleSeries: [], scheduleOccurrenceStates: [],
+    scheduleDailyNotes: [], focusSessions: [], reviews: [], goals: [], milestones: [], whiteboards: [],
+  };
+  await page.locator("#importFile").setInputFiles({
+    name: "portable-v8.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify(portable)),
+  });
+  await expect(page.locator("#dialogBackdrop")).toBeVisible();
+  await page.locator("#dialogConfirm").click();
+  await expect(page.locator("#toast")).toHaveText("数据导入成功并已通过回读校验");
+  const stored = await page.evaluate(async () => {
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("easynote-db"); request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
+    });
+    const all = (storeName: string) => new Promise<any[]>((resolve, reject) => {
+      const request = db.transaction(storeName, "readonly").objectStore(storeName).getAll(); request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
+    });
+    const [notes, attachments] = await Promise.all([all("notes"), all("attachments")]); db.close();
+    return { notes, attachmentCount: attachments.length };
+  });
+  expect(stored.notes).toHaveLength(1);
+  expect(stored.notes[0].title).toBe("便携备份恢复验证");
+  expect(stored.notes[0].content).toContain("data-attachment-id=");
+  expect(stored.attachmentCount).toBe(1);
+  const importedImage = page.locator('#contentEditor img[data-attachment-id]');
+  await expect(importedImage).toBeVisible();
+  await expect.poll(() => importedImage.evaluate((image: HTMLImageElement) => ({ width: image.naturalWidth, height: image.naturalHeight }))).toEqual({ width: 1, height: 1 });
+  await page.reload();
+  const reloadedImage = page.locator('#contentEditor img[data-attachment-id]');
+  await expect(reloadedImage).toBeVisible();
+  await expect.poll(() => reloadedImage.evaluate((image: HTMLImageElement) => image.naturalWidth > 0 && image.naturalHeight > 0)).toBe(true);
+  const rescue = await page.evaluate(async () => {
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("easynote-rescue-db"); request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
+    });
+    const latest = await new Promise<any>((resolve, reject) => {
+      const request = db.transaction("snapshots", "readonly").objectStore("snapshots").get("latest"); request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
+    });
+    db.close();
+    return { notes: latest?.data?.notes?.length || 0, attachments: latest?.attachments?.length || 0 };
+  });
+  expect(rescue).toEqual({ notes: 1, attachments: 1 });
 });
 
 test("keeps different multi-tab edits and preserves same-note conflicts", async ({ page, context }, testInfo) => {

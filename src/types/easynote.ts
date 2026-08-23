@@ -63,6 +63,11 @@ export interface TaskView {
   [key: string]: unknown;
 }
 
+export interface ScheduleTimeSlot {
+  startTime: string;
+  endTime?: string;
+}
+
 export interface ScheduleEntry {
   id: string;
   title: string;
@@ -70,6 +75,7 @@ export interface ScheduleEntry {
   allDay: boolean;
   startTime?: string;
   endTime?: string;
+  timeSlots?: ScheduleTimeSlot[];
   notes?: string;
   color?: string;
   completed?: boolean;

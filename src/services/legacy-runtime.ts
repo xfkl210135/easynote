@@ -1,8 +1,13 @@
 import { shallowRef } from "vue";
-import type { AppState } from "../types/easynote";
+import type { AppState, Note } from "../types/easynote";
 
 export interface RuntimeSafety {
   recordRecovery(kind: string, label: string, payload: unknown): Promise<unknown>;
+  putAttachment(blob: Blob, metadata?: { name?: string; type?: string }): Promise<{ id: string; url: string; name?: string; type?: string; size?: number }>;
+  getAttachmentUrl(id: string): string | null;
+  getAttachmentIdByUrl(url: string): string;
+  getHistory(noteId: string): Promise<Array<{ id: string; createdAt: string; reason: string; snapshot: Note }>>;
+  getHistorySnapshot(id: string): Promise<Note | null>;
 }
 
 export interface EasyNoteRuntime {
@@ -12,6 +17,7 @@ export interface EasyNoteRuntime {
   toast(message: string): void;
   openTask(id: string): void;
   openNote(id: string): void;
+  getActiveNoteId(): string | null;
 }
 
 export type ScheduleCommand =

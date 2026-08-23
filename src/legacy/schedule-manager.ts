@@ -10,6 +10,14 @@
   const esc = (value) => { const node = document.createElement("div"); node.textContent = value ?? ""; return node.innerHTML; };
   const attr = (value) => esc(value).replace(/"/g, "&quot;");
   const colorValue = (value) => /^#[0-9a-f]{6}$/i.test(value || "") ? value : COLORS[0];
+  const scheduleTimeSlots = (item) => {
+    if (item?.allDay) return [];
+    const source = Array.isArray(item?.timeSlots) && item.timeSlots.length
+      ? item.timeSlots
+      : item?.startTime ? [{ startTime: item.startTime, endTime: item.endTime || "" }] : [];
+    return source.map((slot) => ({ startTime: String(slot?.startTime || ""), endTime: String(slot?.endTime || "") }))
+      .filter((slot) => /^\d{2}:\d{2}$/.test(slot.startTime) && (!slot.endTime || /^\d{2}:\d{2}$/.test(slot.endTime)) && (!slot.endTime || slot.endTime > slot.startTime));
+  };
 
   function localDate(date = new Date()) { return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`; }
   function parseDate(value) {
@@ -44,7 +52,7 @@
       this.state.scheduleDailyNotes = Array.isArray(this.state.scheduleDailyNotes) ? this.state.scheduleDailyNotes : [];
       this.state.scheduleEntries.forEach((entry) => {
         entry.title = String(entry.title || "").trim() || "未命名日程"; entry.date = parseDate(entry.date) ? entry.date : localDate();
-        entry.allDay = entry.allDay !== false; entry.startTime = entry.allDay ? "" : String(entry.startTime || ""); entry.endTime = entry.allDay ? "" : String(entry.endTime || "");
+        entry.allDay = entry.allDay !== false; entry.timeSlots = scheduleTimeSlots(entry); entry.startTime = entry.allDay ? "" : String(entry.timeSlots[0]?.startTime || entry.startTime || ""); entry.endTime = entry.allDay ? "" : String(entry.timeSlots[0]?.endTime || entry.endTime || "");
         entry.notes = String(entry.notes || ""); entry.color = colorValue(entry.color); entry.completed = Boolean(entry.completed); entry.taskId = String(entry.taskId || "");
         entry.reminderMode = ["auto", "none", "custom"].includes(entry.reminderMode) ? entry.reminderMode : "auto"; entry.customReminderAt = entry.reminderMode === "custom" ? String(entry.customReminderAt || "") : "";
         entry.createdAt ||= now(); entry.updatedAt ||= entry.createdAt;
@@ -55,7 +63,7 @@
 
     normalizeSeries(series) {
       series.title = String(series.title || "").trim() || "未命名固定日程"; series.startDate = parseDate(series.startDate) ? series.startDate : localDate();
-      series.allDay = series.allDay !== false; series.startTime = series.allDay ? "" : String(series.startTime || ""); series.endTime = series.allDay ? "" : String(series.endTime || "");
+      series.allDay = series.allDay !== false; series.timeSlots = scheduleTimeSlots(series); series.startTime = series.allDay ? "" : String(series.timeSlots[0]?.startTime || series.startTime || ""); series.endTime = series.allDay ? "" : String(series.timeSlots[0]?.endTime || series.endTime || "");
       series.notes = String(series.notes || ""); series.color = colorValue(series.color); series.taskId = String(series.taskId || ""); series.reminderMode = series.reminderMode === "none" ? "none" : "auto";
       series.recurrenceType = ["daily", "weekdays", "weekly", "monthly"].includes(series.recurrenceType) ? series.recurrenceType : "daily";
       series.recurrenceInterval = Math.max(1, Number(series.recurrenceInterval) || 1); series.weekdays = Array.isArray(series.weekdays) ? [...new Set(series.weekdays.map(Number).filter((day) => day >= 0 && day <= 6))] : [];
@@ -75,7 +83,7 @@
       }
       for (const entry of this.state.scheduleEntries.filter((item) => item.seriesId && templateIds.has(item.seriesId))) {
         const series = this.state.scheduleSeries.find((item) => item.id === entry.seriesId); if (!series) continue;
-        const override = {}; ["title","allDay","startTime","endTime","notes","color","taskId","reminderMode"].forEach((key) => { if (entry[key] !== series[key]) override[key] = entry[key]; });
+        const override = {}; ["title","allDay","startTime","endTime","timeSlots","notes","color","taskId","reminderMode"].forEach((key) => { if (JSON.stringify(entry[key]) !== JSON.stringify(series[key])) override[key] = entry[key]; });
         const occurrence = { id: `${series.id}@${entry.date}`, seriesId: series.id, date: entry.date, completed: entry.completed, deleted: false, override, updatedAt: entry.updatedAt || now() };
         const index = this.state.scheduleOccurrenceStates.findIndex((item) => item.id === occurrence.id); if (index >= 0) this.state.scheduleOccurrenceStates[index] = occurrence; else this.state.scheduleOccurrenceStates.push(occurrence);
       }
@@ -215,7 +223,7 @@
     runContextAction(action,value=""){if(action==="schedule-toggle")this.toggleComplete(value);else if(action==="schedule-edit")this.editSchedule(value);else if(action==="schedule-copy-title"){const item=this.itemByKey(value);if(item)navigator.clipboard?.writeText(item.title);}else if(action==="schedule-delete")this.deleteKey(value);else if(action==="schedule-convert-series"){const item=this.state.scheduleEntries.find((entry)=>entry.id===value);if(item)this.createSeries({_convertId:item.id,title:item.title,startDate:item.date,allDay:item.allDay,startTime:item.startTime,endTime:item.endTime,notes:item.notes,color:item.color,reminderMode:item.reminderMode});}else if(action==="schedule-edit-series")this.editSeries(value);else if(action==="schedule-duplicate-series")this.duplicateSeries(value);else if(action==="schedule-toggle-series")this.toggleSeries(value);else if(action==="schedule-delete-series")this.deleteSeries(value);else if(action==="schedule-select-date")this.selectDate(value);else if(action==="schedule-new-date")this.createSchedule({date:value});else if(action==="schedule-new-series-date")this.createSeries({startDate:value});else if(action==="schedule-new-series")this.createSeries();else if(action==="schedule-calendar")this.setCalendarOpen(true);else if(action==="schedule-view")this.setView(value);}
 
     loadReminderLog(){try{return JSON.parse(localStorage.getItem(REMINDER_KEY)||"{}");}catch{return{};}} saveReminderLog(){localStorage.setItem(REMINDER_KEY,JSON.stringify(this.reminderLog));}
-    reminderCandidates(item){if(item.completed||item.reminderMode==="none")return[];if(item.kind==="entry"&&item.reminderMode==="custom"){const due=new Date(item.customReminderAt);return Number.isNaN(due.getTime())?[]:[{key:"custom",due,message:"这是你设置的自定义提醒"}];}if(item.allDay)return[{key:"morning",due:new Date(`${item.date}T09:00:00`),message:"今天有这项安排，准备开始吧",flexible:true},{key:"evening",due:new Date(`${item.date}T20:00:00`),message:"今天尚未完成，请确认进度",flexible:true}];const result=[{key:"start",due:new Date(`${item.date}T${item.startTime}:00`),message:"日程现在开始，完成后记得标记"}];if(item.endTime)result.push({key:"finish",due:new Date(`${item.date}T${item.endTime}:00`),message:"日程已到结束时间，请确认是否完成"});return result;}
+    reminderCandidates(item){if(item.completed||item.reminderMode==="none")return[];if(item.kind==="entry"&&item.reminderMode==="custom"){const due=new Date(item.customReminderAt);return Number.isNaN(due.getTime())?[]:[{key:"custom",due,message:"这是你设置的自定义提醒"}];}if(item.allDay)return[{key:"morning",due:new Date(`${item.date}T09:00:00`),message:"今天有这项安排，准备开始吧",flexible:true},{key:"evening",due:new Date(`${item.date}T20:00:00`),message:"今天尚未完成，请确认进度",flexible:true}];const slots=scheduleTimeSlots(item);return slots.flatMap((slot,index)=>{const result=[{key:`start-${index}`,due:new Date(`${item.date}T${slot.startTime}:00`),message:"日程现在开始，完成后记得标记"}];if(slot.endTime)result.push({key:`finish-${index}`,due:new Date(`${item.date}T${slot.endTime}:00`),message:"日程已到结束时间，请确认是否完成"});return result;});}
     checkReminders(){if(!this.reminderLog)return;const current=new Date(),date=localDate(current);for(const item of this.itemsOn(date))for(const reminder of this.reminderCandidates(item)){const due=reminder.due.getTime(),key=`${item.id}|${reminder.key}|${due}`;if(this.reminderLog[key])continue;const delta=Date.now()-due,flexible=reminder.flexible&&delta>=0&&delta<12*3600000;if(!flexible&&(delta<0||delta>5*60000))continue;this.reminderLog[key]=Date.now();this.saveReminderLog();this.showReminder(item,reminder.message);}}
     showReminder(item,message){this.reminderItemId=item.id;this.reminderCard.querySelector("strong").textContent=item.title;this.reminderCard.querySelector("small").textContent=message;this.reminderCard.hidden=false;if("Notification"in window&&Notification.permission==="granted")try{const notification=new Notification(`EasyNote · ${item.title}`,{body:message,tag:`easynote-${item.id}`,renotify:true});notification.onclick=()=>{window.focus();this.options.openSchedule?.(item.date);notification.close();};}catch{}}
     async requestReminderPermission(){if(!("Notification"in window)){this.options.toast("当前浏览器仅支持站内提醒");return;}const permission=await Notification.requestPermission();this.renderReminderState();this.options.toast(permission==="granted"?"提醒已开启":"未获得系统通知权限，仍保留站内提醒");}
@@ -230,6 +238,7 @@
       this.undoCard.querySelector("button").addEventListener("click",()=>this.undoDelete());this.reminderCard.querySelector("[data-reminder-view]").addEventListener("click",()=>{const item=this.itemByKey(this.reminderItemId);if(item)this.options.openSchedule?.(item.date);this.reminderCard.hidden=true;});this.reminderCard.querySelector("[data-reminder-complete]").addEventListener("click",()=>{if(this.reminderItemId)this.toggleComplete(this.reminderItemId);this.reminderCard.hidden=true;});this.reminderCard.querySelector("[data-reminder-close]").addEventListener("click",()=>this.reminderCard.hidden=true);
       document.addEventListener("click",(event)=>{if(this.active&&this.ui.calendarOpen&&!event.target.closest("#scheduleCalendarPanel,#scheduleCalendarToggle"))this.setCalendarOpen(false);});document.addEventListener("keydown",(event)=>{if(event.key!=="Escape")return;if(!this.editorBackdrop.hidden||!this.seriesBackdrop.hidden){event.preventDefault();this.closeDialogs();}else if(this.ui.calendarOpen){event.preventDefault();this.setCalendarOpen(false);}});
     }
+    timeLabel(item){if(item.allDay)return "全天";const slots=scheduleTimeSlots(item);return slots.map((slot)=>`${slot.startTime}${slot.endTime?`–${slot.endTime}`:""}`).join("、")||"未设置时间";}
   }
 
 export { ScheduleManager };

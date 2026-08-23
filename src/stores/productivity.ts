@@ -11,10 +11,21 @@ import type {
   ScheduleEntry,
   ScheduleOccurrenceState,
   ScheduleSeries,
+  ScheduleTimeSlot,
   Task,
 } from "../types/easynote";
 
 const DAY = 86_400_000;
+function normalizedTimeSlots(input: Partial<ScheduleEntry> | undefined): ScheduleTimeSlot[] {
+  if (input?.allDay !== false) return [];
+  const source = Array.isArray(input?.timeSlots) ? input.timeSlots : [];
+  const slots = source.map((slot) => ({ startTime: String(slot?.startTime || ""), endTime: String(slot?.endTime || "") }))
+    .filter((slot) => /^\d{2}:\d{2}$/.test(slot.startTime))
+    .filter((slot) => !slot.endTime || /^\d{2}:\d{2}$/.test(slot.endTime))
+    .filter((slot) => !slot.endTime || slot.endTime > slot.startTime);
+  if (slots.length) return slots;
+  return input?.startTime ? [{ startTime: input.startTime, endTime: input.endTime || "" }] : [];
+}
 const nowIso = () => new Date().toISOString();
 const makeId = (prefix: string) => `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
 
@@ -137,9 +148,10 @@ export const useProductivityStore = defineStore("productivity", () => {
   async function saveSchedule(input: Partial<ScheduleEntry> & Pick<ScheduleEntry, "title" | "date">, existingId = ""): Promise<void> {
     if (!state.value) return;
     const stamp = nowIso();
+    const timeSlots = normalizedTimeSlots(input);
     const clean: ScheduleEntry = {
       id: existingId || makeId("schedule"), title: input.title.trim(), date: input.date, allDay: input.allDay !== false,
-      startTime: input.allDay === false ? input.startTime || "" : "", endTime: input.allDay === false ? input.endTime || "" : "",
+      startTime: timeSlots[0]?.startTime || "", endTime: timeSlots[0]?.endTime || "", timeSlots,
       notes: input.notes || "", color: input.color || "#4f7df3", completed: Boolean(input.completed), taskId: input.taskId || "",
       noteId: input.noteId || "", url: input.url || "", urlLabel: input.urlLabel || "", reminderMode: input.reminderMode || "auto",
       customReminderAt: input.reminderMode === "custom" ? input.customReminderAt || "" : "", createdAt: input.createdAt || stamp, updatedAt: stamp,
@@ -192,9 +204,10 @@ export const useProductivityStore = defineStore("productivity", () => {
   async function saveSeries(input: Partial<ScheduleSeries> & Pick<ScheduleSeries, "title" | "startDate">, existingId = ""): Promise<void> {
     if (!state.value) return;
     const stamp = nowIso();
+    const timeSlots = normalizedTimeSlots(input);
     const item = {
       id: existingId || makeId("series"), title: input.title.trim(), date: input.startDate, startDate: input.startDate,
-      allDay: input.allDay !== false, startTime: input.allDay === false ? input.startTime || "" : "", endTime: input.allDay === false ? input.endTime || "" : "",
+      allDay: input.allDay !== false, startTime: timeSlots[0]?.startTime || "", endTime: timeSlots[0]?.endTime || "", timeSlots,
       notes: input.notes || "", color: input.color || "#4f7df3", completed: false, taskId: input.taskId || "", noteId: input.noteId || "", url: input.url || "", urlLabel: input.urlLabel || "",
       recurrenceType: input.recurrenceType || "daily", recurrenceInterval: Math.max(1, Number(input.recurrenceInterval) || 1), weekdays: Array.isArray(input.weekdays) ? [...input.weekdays] : [], dayOfMonth: Number(input.dayOfMonth) || parseLocalDate(input.startDate)?.getDate() || 1,
       until: input.until || "", active: input.active !== false, reminderMode: input.reminderMode === "none" ? "none" : "auto", createdAt: input.createdAt || stamp, updatedAt: stamp,

@@ -190,7 +190,9 @@
 .weekday-picker input { min-height: 0; }
 .series-clock-fields { padding: 11px; border: 1px solid color-mix(in srgb,var(--primary) 24%,var(--border)); border-radius: 10px; background: color-mix(in srgb,var(--primary) 4%,var(--surface)); }
 .focus-mini { position: fixed; z-index: 280; right: max(18px,env(safe-area-inset-right)); bottom: max(82px,calc(env(safe-area-inset-bottom) + 82px)); min-width: 170px; border: 1px solid color-mix(in srgb,var(--primary) 35%,var(--border)); border-radius: 14px; color: var(--text); background: color-mix(in srgb,var(--primary) 6%,var(--surface)); box-shadow: 0 14px 38px rgba(15,23,42,.22); overflow: hidden; }
+.focus-mini:not(.active) { display: flex; }
 .focus-start-button { min-height: 46px; padding: 0 17px; border: 0; color: var(--primary); background: transparent; font-weight: 700; }
+.floating-notes-launch { min-height: 40px; padding: 0 14px; border: 0; border-left: 1px solid var(--border); color: var(--primary); background: transparent; font-weight: 700; }
 .focus-mini-main { width: 100%; display: grid; grid-template-columns: 1fr auto; gap: 2px 12px; padding: 10px 13px; border: 0; color: var(--text); background: transparent; text-align: left; }
 .focus-mini-main span { color: var(--primary); font-size: 9px; }
 .focus-mini-main strong { grid-row: span 2; align-self: center; font-variant-numeric: tabular-nums; font-size: 21px; }

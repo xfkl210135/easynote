@@ -7,7 +7,7 @@ export default defineConfig({
   plugins: [
     vue(),
     VitePWA({
-      registerType: "prompt",
+      registerType: "autoUpdate",
       injectRegister: false,
       includeAssets: ["icons/easynote.svg", "icons/easynote-192.png", "icons/easynote-512.png", "icons/easynote-maskable-512.png"],
       manifest: {
@@ -33,8 +33,8 @@ export default defineConfig({
         globPatterns: ["**/*.{js,css,html,svg,png,ico,webp}"],
         navigateFallback: "index.html",
         cleanupOutdatedCaches: true,
-        clientsClaim: false,
-        skipWaiting: false,
+        clientsClaim: true,
+        skipWaiting: true,
         runtimeCaching: [],
       },
       devOptions: { enabled: false },

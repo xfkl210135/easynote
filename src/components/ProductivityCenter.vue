@@ -3,7 +3,18 @@ import { computed, defineComponent, h, onBeforeUnmount, onMounted, reactive, ref
 import { useRoute, useRouter } from "vue-router";
 import { scheduleCommand } from "../services/legacy-runtime";
 import { addDays, centeredWeek, localDate, parseLocalDate, persistProductivitySettings, useProductivityStore } from "../stores/productivity";
-import type { FocusSession, FocusStatus, Goal, Milestone, ReviewPeriod, ScheduleEntry, ScheduleSeries } from "../types/easynote";
+import type { FocusSession, FocusStatus, Goal, Milestone, ReviewPeriod, ScheduleEntry, ScheduleSeries, ScheduleTimeSlot } from "../types/easynote";
+
+function scheduleSlotsFor(item: Pick<ScheduleEntry, "allDay" | "startTime" | "endTime" | "timeSlots">): ScheduleTimeSlot[] {
+  if (item.allDay) return [];
+  if (Array.isArray(item.timeSlots) && item.timeSlots.length) return item.timeSlots;
+  return item.startTime ? [{ startTime: item.startTime, endTime: item.endTime || "" }] : [];
+}
+
+function scheduleTimeText(item: Pick<ScheduleEntry, "allDay" | "startTime" | "endTime" | "timeSlots">): string {
+  if (item.allDay) return "全天";
+  return scheduleSlotsFor(item).map((slot) => `${slot.startTime || "--:--"}${slot.endTime ? `–${slot.endTime}` : ""}`).join("、") || "未设置时间";
+}
 
 const ScheduleCard = defineComponent({
   name: "ScheduleCard",
@@ -37,7 +48,7 @@ const ScheduleCard = defineComponent({
       onContextmenu: (event: MouseEvent) => { event.preventDefault(); emit("context", { item: props.item, x: event.clientX, y: event.clientY }); },
     }, [
       h("button", { class: "schedule-check", type: "button", disabled: toggling.value, title: completed.value ? "重新打开" : "标记为完成", "aria-label": completed.value ? `重新打开：${props.item.title}` : `标记完成：${props.item.title}`, onClick: toggle }, completed.value ? "✓" : ""),
-      h("button", { class: "schedule-card-main", onClick: () => emit("edit") }, [h("small", props.item.allDay ? "全天" : `${props.item.startTime || "--:--"}${props.item.endTime ? `–${props.item.endTime}` : ""}`), h("strong", props.item.title), props.item.notes ? h("span", props.item.notes) : null]),
+      h("button", { class: "schedule-card-main", onClick: () => emit("edit") }, [h("small", scheduleTimeText(props.item)), h("strong", props.item.title), props.item.notes ? h("span", props.item.notes) : null]),
       h("div", { class: "schedule-card-actions" }, [props.statusAction ? h("button", { class: "schedule-status-action", disabled: toggling.value, onClick: toggle }, toggling.value ? "保存中…" : completed.value ? "重新打开" : "标记完成") : null, h("button", { onClick: start }, "计时"), props.item.taskId ? taskAvailable.value ? h("button", { onClick: () => cardStore.openTask(props.item.taskId!) }, "任务") : h("span", { class: "broken-link" }, "任务已失效") : null, props.item.noteId ? noteAvailable.value ? h("button", { onClick: () => cardStore.openNote(props.item.noteId!) }, "笔记") : h("span", { class: "broken-link" }, "笔记已失效") : null, props.item.url ? h("button", { onClick: openUrl }, props.item.urlLabel || "链接") : null, h("button", { onClick: () => emit("edit") }, "编辑")]),
     ]);
   },
@@ -183,19 +194,27 @@ async function quickAdd() {
 const scheduleOpen = ref(false);
 const editingScheduleId = ref("");
 const scheduleError = ref("");
-const scheduleForm = reactive({ title: "", date: localDate(), allDay: true, startTime: "", endTime: "", notes: "", color: "#4f7df3", completed: false, taskId: "", noteId: "", url: "", urlLabel: "", reminderMode: "auto" as "auto" | "none" | "custom", customReminderAt: "" });
+const scheduleForm = reactive({ title: "", date: localDate(), allDay: true, startTime: "", endTime: "", timeSlots: [] as ScheduleTimeSlot[], notes: "", color: "#4f7df3", completed: false, taskId: "", noteId: "", url: "", urlLabel: "", reminderMode: "auto" as "auto" | "none" | "custom", customReminderAt: "" });
+watch(() => scheduleForm.allDay, (allDay) => { if (!allDay && !scheduleForm.timeSlots.length) scheduleForm.timeSlots.push({ startTime: scheduleForm.startTime || "09:00", endTime: scheduleForm.endTime || "10:00" }); });
+function slotsFrom(item?: Partial<ScheduleEntry>): ScheduleTimeSlot[] {
+  if (item?.allDay !== false) return [];
+  if (Array.isArray(item?.timeSlots) && item.timeSlots.length) return item.timeSlots.map((slot) => ({ startTime: slot.startTime || "", endTime: slot.endTime || "" }));
+  return item?.startTime ? [{ startTime: item.startTime, endTime: item.endTime || "" }] : [{ startTime: "09:00", endTime: "10:00" }];
+}
 function editSchedule(item?: ScheduleEntry, initial: Partial<ScheduleEntry> = {}) {
   if (item?.id.includes("@")) { const source = store.series.find((entry) => entry.id === item.seriesId); if (source) editSeries(source); return; }
   const value = item || initial;
   editingScheduleId.value = item?.id || ""; scheduleError.value = "";
-  Object.assign(scheduleForm, { title: value.title || "", date: value.date || selectedDate.value, allDay: value.allDay !== false, startTime: value.startTime || "", endTime: value.endTime || "", notes: value.notes || "", color: value.color || "#4f7df3", completed: Boolean(value.completed), taskId: value.taskId || "", noteId: value.noteId || "", url: value.url || "", urlLabel: value.urlLabel || "", reminderMode: value.reminderMode || "auto", customReminderAt: value.customReminderAt || "" });
+  const timeSlots = slotsFrom(value);
+  Object.assign(scheduleForm, { title: value.title || "", date: value.date || selectedDate.value, allDay: value.allDay !== false, startTime: timeSlots[0]?.startTime || "", endTime: timeSlots[0]?.endTime || "", timeSlots, notes: value.notes || "", color: value.color || "#4f7df3", completed: Boolean(value.completed), taskId: value.taskId || "", noteId: value.noteId || "", url: value.url || "", urlLabel: value.urlLabel || "", reminderMode: value.reminderMode || "auto", customReminderAt: value.customReminderAt || "" });
   scheduleOpen.value = true;
 }
 async function submitSchedule() {
   scheduleError.value = "";
   try {
-    if (!scheduleForm.allDay && !scheduleForm.startTime) throw new Error("请选择开始时间");
-    if (scheduleForm.endTime && scheduleForm.endTime <= scheduleForm.startTime) throw new Error("结束时间必须晚于开始时间");
+    if (!scheduleForm.allDay && !scheduleForm.timeSlots.length && scheduleForm.startTime) scheduleForm.timeSlots.push({ startTime: scheduleForm.startTime, endTime: scheduleForm.endTime || "" });
+    if (!scheduleForm.allDay && !scheduleForm.timeSlots.length) throw new Error("请至少添加一个时间段");
+    if (!scheduleForm.allDay && scheduleForm.timeSlots.some((slot) => !slot.startTime || slot.endTime && slot.endTime <= slot.startTime)) throw new Error("每个时间段的结束时间必须晚于开始时间");
     if (scheduleForm.reminderMode === "custom" && !scheduleForm.customReminderAt) throw new Error("请选择自定义提醒时间");
     await store.saveSchedule({ ...scheduleForm }, editingScheduleId.value); scheduleOpen.value = false;
   } catch (cause) { scheduleError.value = cause instanceof Error ? cause.message : "保存失败"; }
@@ -206,17 +225,18 @@ function visit(value: string) {
   catch { store.toast("关联网址已失效，请编辑日程后重试"); }
 }
 
-const timelineStart = computed(() => Math.min(6, ...timedItems.value.map((item) => Number(item.startTime?.slice(0, 2) || 6))));
-const timelineEnd = computed(() => Math.max(24, ...timedItems.value.map((item) => Math.ceil(Number(item.endTime?.slice(0, 2) || item.startTime?.slice(0, 2) || 23) + 1))));
+const timelineSlots = computed(() => timedItems.value.flatMap((item) => slotsFrom(item).map((slot) => ({ item, slot }))));
+const timelineStart = computed(() => Math.min(6, ...timelineSlots.value.map(({ slot }) => Number(slot.startTime?.slice(0, 2) || 6))));
+const timelineEnd = computed(() => Math.max(24, ...timelineSlots.value.map(({ slot }) => Math.ceil(Number(slot.endTime?.slice(0, 2) || slot.startTime?.slice(0, 2) || 23) + 1))));
 const timelineHours = computed(() => Array.from({ length: timelineEnd.value - timelineStart.value + 1 }, (_, index) => timelineStart.value + index));
 const timelineBlocks = computed(() => {
   const lanes: number[] = [];
-  const blocks = timedItems.value.map((item) => {
-    const [startHour, startMinute] = (item.startTime || "00:00").split(":").map(Number);
-    const [endHour, endMinute] = (item.endTime || item.startTime || "00:30").split(":").map(Number);
+  const blocks = timelineSlots.value.map(({ item, slot }) => {
+    const [startHour, startMinute] = (slot.startTime || "00:00").split(":").map(Number);
+    const [endHour, endMinute] = (slot.endTime || slot.startTime || "00:30").split(":").map(Number);
     const start = startHour * 60 + startMinute, end = Math.max(start + 30, endHour * 60 + endMinute);
     let lane = lanes.findIndex((laneEnd) => laneEnd <= start); if (lane < 0) lane = lanes.length; lanes[lane] = end;
-    return { item, start, end, lane };
+    return { item, slot, start, end, lane };
   });
   const count = Math.max(1, lanes.length);
   return blocks.map((block) => ({ ...block, lanes: count, style: { "--top": `${(block.start - timelineStart.value * 60) * 1.05}px`, "--height": `${Math.max(42, (block.end - block.start) * 1.05)}px`, "--lane": block.lane, "--lanes": count, "--schedule-color": block.item.color || "#4f7df3" } }));
@@ -226,24 +246,32 @@ const currentTimeStyle = computed(() => { const now = new Date(nowClock.value); 
 
 const seriesOpen = ref(false);
 const editingSeriesId = ref("");
-const seriesForm = reactive({ title: "", startDate: localDate(), allDay: true, startTime: "", endTime: "", notes: "", color: "#4f7df3", taskId: "", noteId: "", url: "", urlLabel: "", recurrenceType: "daily" as ScheduleSeries["recurrenceType"], recurrenceInterval: 1, weekdays: [] as number[], dayOfMonth: 1, until: "", active: true, reminderMode: "auto" as "auto" | "none" });
+const seriesForm = reactive({ title: "", startDate: localDate(), allDay: true, startTime: "", endTime: "", timeSlots: [] as ScheduleTimeSlot[], notes: "", color: "#4f7df3", taskId: "", noteId: "", url: "", urlLabel: "", recurrenceType: "daily" as ScheduleSeries["recurrenceType"], recurrenceInterval: 1, weekdays: [] as number[], dayOfMonth: 1, until: "", active: true, reminderMode: "auto" as "auto" | "none" });
 const weekdayOptions = [[1, "一"], [2, "二"], [3, "三"], [4, "四"], [5, "五"], [6, "六"], [0, "日"]] as const;
 function recurrenceLabel(type: ScheduleSeries["recurrenceType"]): string { return type === "daily" ? "每天" : type === "weekdays" ? "工作日" : type === "weekly" ? "每周" : "每月"; }
-function seriesTimeLabel(item: ScheduleSeries): string { return item.allDay ? "全天" : `${item.startTime || "未设置"}${item.endTime ? `–${item.endTime}` : ""}`; }
+function timeSlotsLabel(item: Pick<ScheduleEntry, "allDay" | "startTime" | "endTime" | "timeSlots">): string {
+  if (item.allDay) return "全天";
+  const slots = Array.isArray(item.timeSlots) && item.timeSlots.length ? item.timeSlots : slotsFrom(item);
+  return slots.map((slot) => `${slot.startTime || "未设置"}${slot.endTime ? `–${slot.endTime}` : ""}`).join("、") || "未设置";
+}
+function seriesTimeLabel(item: ScheduleSeries): string { return timeSlotsLabel(item); }
 function setSeriesTimeType(event: Event) {
   const timed = (event.target as HTMLSelectElement).value === "timed";
   seriesForm.allDay = !timed;
-  if (timed && !seriesForm.startTime) { seriesForm.startTime = "09:00"; seriesForm.endTime = "10:00"; }
+  if (timed && !seriesForm.timeSlots.length) { seriesForm.timeSlots.push({ startTime: "09:00", endTime: "10:00" }); seriesForm.startTime = "09:00"; seriesForm.endTime = "10:00"; }
 }
+function addTimeSlot(target: { timeSlots: ScheduleTimeSlot[] }) { const previous = target.timeSlots[target.timeSlots.length - 1]; target.timeSlots.push({ startTime: previous?.endTime || "09:00", endTime: "" }); }
+function removeTimeSlot(target: { timeSlots: ScheduleTimeSlot[] }, index: number) { if (target.timeSlots.length > 1) target.timeSlots.splice(index, 1); }
 function editSeries(item?: ScheduleSeries) {
   editingSeriesId.value = item?.id || "";
   const startDate = item?.startDate || selectedDate.value;
-  Object.assign(seriesForm, { title: item?.title || "", startDate, allDay: item?.allDay !== false, startTime: item?.startTime || "", endTime: item?.endTime || "", notes: item?.notes || "", color: item?.color || "#4f7df3", taskId: item?.taskId || "", noteId: item?.noteId || "", url: item?.url || "", urlLabel: item?.urlLabel || "", recurrenceType: item?.recurrenceType || "daily", recurrenceInterval: item?.recurrenceInterval || 1, weekdays: item?.weekdays?.length ? [...item.weekdays] : [parseLocalDate(startDate)?.getDay() ?? 1], dayOfMonth: item?.dayOfMonth || parseLocalDate(startDate)?.getDate() || 1, until: item?.until || "", active: item?.active !== false, reminderMode: item?.reminderMode === "none" ? "none" : "auto" });
+  const timeSlots = slotsFrom(item);
+  Object.assign(seriesForm, { title: item?.title || "", startDate, allDay: item?.allDay !== false, startTime: timeSlots[0]?.startTime || "", endTime: timeSlots[0]?.endTime || "", timeSlots, notes: item?.notes || "", color: item?.color || "#4f7df3", taskId: item?.taskId || "", noteId: item?.noteId || "", url: item?.url || "", urlLabel: item?.urlLabel || "", recurrenceType: item?.recurrenceType || "daily", recurrenceInterval: item?.recurrenceInterval || 1, weekdays: item?.weekdays?.length ? [...item.weekdays] : [parseLocalDate(startDate)?.getDay() ?? 1], dayOfMonth: item?.dayOfMonth || parseLocalDate(startDate)?.getDate() || 1, until: item?.until || "", active: item?.active !== false, reminderMode: item?.reminderMode === "none" ? "none" : "auto" });
   seriesOpen.value = true;
 }
 async function submitSeries() {
-  if (!seriesForm.allDay && !seriesForm.startTime) return store.toast("请选择开始时间");
-  if (seriesForm.endTime && seriesForm.endTime <= seriesForm.startTime) return store.toast("结束时间必须晚于开始时间");
+  if (!seriesForm.allDay && !seriesForm.timeSlots.length) return store.toast("请至少添加一个时间段");
+  if (!seriesForm.allDay && seriesForm.timeSlots.some((slot) => !slot.startTime || slot.endTime && slot.endTime <= slot.startTime)) return store.toast("每个时间段的结束时间必须晚于开始时间");
   if (seriesForm.recurrenceType === "weekly" && !seriesForm.weekdays.length) return store.toast("请至少选择一个重复星期");
   try { await store.saveSeries({ ...seriesForm }, editingSeriesId.value); seriesOpen.value = false; }
   catch (cause) { store.toast(cause instanceof Error ? cause.message : "固定日程保存失败"); }
@@ -372,7 +400,7 @@ onBeforeUnmount(() => { window.clearInterval(clockTimer); document.removeEventLi
                 <div class="day-timeline" :style="{ height: `${(timelineEnd - timelineStart) * 63 + 20}px` }">
                   <div v-for="hour in timelineHours" :key="hour" class="timeline-hour" :style="{ top: `${(hour - timelineStart) * 63}px` }"><span>{{ String(hour).padStart(2, '0') }}:00</span></div>
                   <i v-if="selectedDate === localDate() && currentHour >= timelineStart && currentHour <= timelineEnd" class="timeline-now" :style="currentTimeStyle" :data-time="new Date(nowClock).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })"></i>
-                  <button v-for="block in timelineBlocks" :key="block.item.id" class="timeline-block" type="button" :style="block.style" @click="editSchedule(block.item)" @contextmenu.prevent="openTimelineContext(block.item, $event)"><small>{{ timeLabel(block.item) }}</small><strong>{{ block.item.title }}</strong><span><b @click.stop="startFor(block.item)">开始计时</b><b v-if="block.item.taskId && store.tasks.some(task => task.id === block.item.taskId)" @click.stop="store.openTask(block.item.taskId)">任务</b><b v-else-if="block.item.taskId" class="broken-link">任务已失效</b><b v-if="block.item.noteId && store.notes.some(note => note.id === block.item.noteId)" @click.stop="store.openNote(block.item.noteId)">笔记</b><b v-else-if="block.item.noteId" class="broken-link">笔记已失效</b><b v-if="block.item.url" @click.stop="visit(block.item.url)">{{ block.item.urlLabel || '链接' }}</b></span></button>
+                  <button v-for="(block, index) in timelineBlocks" :key="`${block.item.id}-${block.start}-${index}`" class="timeline-block" type="button" :style="block.style" @click="editSchedule(block.item)" @contextmenu.prevent="openTimelineContext(block.item, $event)"><small>{{ block.slot.startTime }}{{ block.slot.endTime ? `–${block.slot.endTime}` : '' }}</small><strong>{{ block.item.title }}</strong><span><b @click.stop="startFor(block.item)">开始计时</b><b v-if="block.item.taskId && store.tasks.some(task => task.id === block.item.taskId)" @click.stop="store.openTask(block.item.taskId)">任务</b><b v-else-if="block.item.taskId" class="broken-link">任务已失效</b><b v-if="block.item.noteId && store.notes.some(note => note.id === block.item.noteId)" @click.stop="store.openNote(block.item.noteId)">笔记</b><b v-else-if="block.item.noteId" class="broken-link">笔记已失效</b><b v-if="block.item.url" @click.stop="visit(block.item.url)">{{ block.item.urlLabel || '链接' }}</b></span></button>
                 </div>
               </div>
             </div>
@@ -444,7 +472,7 @@ onBeforeUnmount(() => { window.clearInterval(clockTimer); document.removeEventLi
 
     <section v-else class="productivity-page goals-page"><header><div><span>把长期方向拆成可以行动的里程碑</span><h1>长期规划</h1></div><div class="productivity-header-actions"><label><input v-model="showArchivedGoals" type="checkbox"> 显示已归档</label><button class="primary-button" type="button" @click="editGoal()">＋ 新建目标</button></div></header><div class="goal-grid"><article v-for="goal in visibleGoals" :key="goal.id" class="goal-card" :style="{ '--goal-color': goal.color }" @contextmenu.prevent="openGoalContext(goal, $event)"><header><div><strong>{{ goal.title }}</strong><span>{{ goal.status === 'active' ? '进行中' : goal.status === 'paused' ? '已暂停' : goal.status === 'archived' ? '已归档' : '已完成' }}</span></div><b>{{ store.goalProgress(goal) }}%</b></header><div class="goal-progress"><i :style="{ width: `${store.goalProgress(goal)}%` }"></i></div><p>{{ goal.description || '暂无说明' }}</p><small>{{ goal.startDate }}{{ goal.dueDate ? ` → ${goal.dueDate}` : ' · 长期' }}</small><section class="milestone-list"><header><strong>里程碑</strong><button @click="editMilestone(goal.id)">＋ 添加</button></header><label v-for="item in milestonesFor(goal.id)" :key="item.id" @contextmenu.stop.prevent="openGoalContext(goal, $event, item)"><input :checked="item.completed" type="checkbox" @change="toggleMilestone(item)"><span><strong>{{ item.title }}</strong><small>{{ item.dueDate || '无期限' }} · {{ item.taskIds.length }} 个任务</small></span><button @click.prevent="editMilestone(goal.id, item)">编辑</button></label><div v-if="!milestonesFor(goal.id).length" class="productivity-empty compact">还没有里程碑</div></section><footer><button @click="editGoal(goal)">编辑目标</button><button @click="store.archiveGoal(goal.id)">{{ goal.status === 'archived' ? '恢复使用' : '归档' }}</button><button class="danger-text" @click="store.archiveGoal(goal.id, true)">删除</button></footer></article><div v-if="!visibleGoals.length" class="productivity-empty planning-empty"><strong>从一个真正重要的方向开始</strong><span>建立目标，再用里程碑和现有任务把它变成行动。</span><button type="button" @click="editGoal()">新建第一个目标</button></div></div></section>
 
-    <div v-if="scheduleOpen" class="productivity-modal-backdrop" @click.self="scheduleOpen = false"><form class="productivity-modal" @submit.prevent="submitSchedule"><header><div><span>时间与规划</span><h2>{{ editingScheduleId ? '编辑日程' : '新建日程' }}</h2></div><button type="button" @click="scheduleOpen = false">×</button></header><label><span>标题</span><input v-model.trim="scheduleForm.title" required maxlength="120"></label><div class="productivity-form-grid"><label><span>日期</span><input v-model="scheduleForm.date" type="date" required></label><label class="inline-check"><input v-model="scheduleForm.allDay" type="checkbox"> 全天</label></div><div v-if="!scheduleForm.allDay" class="productivity-form-grid"><label><span>开始</span><input v-model="scheduleForm.startTime" type="time" required></label><label><span>结束</span><input v-model="scheduleForm.endTime" type="time"></label></div><label><span>备注</span><textarea v-model="scheduleForm.notes" rows="3"></textarea></label><div class="productivity-form-grid"><label><span>提醒方式</span><select v-model="scheduleForm.reminderMode"><option value="auto">按日程时间提醒</option><option value="custom">自定义时间</option><option value="none">不提醒</option></select></label><label v-if="scheduleForm.reminderMode === 'custom'"><span>提醒时间</span><input v-model="scheduleForm.customReminderAt" type="datetime-local" required></label></div><div class="productivity-form-grid"><label><span>关联任务</span><select v-model="scheduleForm.taskId"><option value="">不关联</option><option v-for="task in store.tasks" :key="task.id" :value="task.id">{{ store.taskTitle(task) }}</option></select></label><label><span>关联笔记</span><select v-model="scheduleForm.noteId"><option value="">不关联</option><option v-for="note in store.notes" :key="note.id" :value="note.id">{{ note.title || '无标题笔记' }}</option></select></label></div><div class="productivity-form-grid"><label><span>网址</span><input v-model.trim="scheduleForm.url" type="url" placeholder="https://"></label><label><span>链接名称</span><input v-model.trim="scheduleForm.urlLabel" placeholder="例如：打开题库"></label></div><p v-if="scheduleError" class="productivity-form-error">{{ scheduleError }}</p><footer><button v-if="editingScheduleId" type="button" class="danger-text" @click="store.deleteSchedule(editingScheduleId); scheduleOpen = false">删除</button><span></span><button type="button" @click="scheduleOpen = false">取消</button><button class="primary-button" type="submit">保存</button></footer></form></div>
+    <div v-if="scheduleOpen" class="productivity-modal-backdrop" @click.self="scheduleOpen = false"><form class="productivity-modal" @submit.prevent="submitSchedule"><header><div><span>时间与规划</span><h2>{{ editingScheduleId ? '编辑日程' : '新建日程' }}</h2></div><button type="button" @click="scheduleOpen = false">×</button></header><label><span>标题</span><input v-model.trim="scheduleForm.title" required maxlength="120"></label><div class="productivity-form-grid"><label><span>日期</span><input v-model="scheduleForm.date" type="date" required></label><label class="inline-check"><input v-model="scheduleForm.allDay" type="checkbox"> 全天</label></div><div v-if="!scheduleForm.allDay" class="series-clock-fields"><div v-for="(slot, index) in scheduleForm.timeSlots" :key="index" class="productivity-form-grid series-time-slot"><label><span>时间段 {{ index + 1 }} · 开始</span><input v-model="slot.startTime" type="time" required></label><label><span>结束时间（可选）</span><div class="time-slot-end"><input v-model="slot.endTime" type="time"><button v-if="scheduleForm.timeSlots.length > 1" type="button" class="danger-text" @click="removeTimeSlot(scheduleForm, index)">删除</button></div></label></div><button type="button" class="secondary-button add-time-slot" @click="addTimeSlot(scheduleForm)">＋ 添加时间段</button></div><label><span>备注</span><textarea v-model="scheduleForm.notes" rows="3"></textarea></label><div class="productivity-form-grid"><label><span>提醒方式</span><select v-model="scheduleForm.reminderMode"><option value="auto">按日程时间提醒</option><option value="custom">自定义时间</option><option value="none">不提醒</option></select></label><label v-if="scheduleForm.reminderMode === 'custom'"><span>提醒时间</span><input v-model="scheduleForm.customReminderAt" type="datetime-local" required></label></div><div class="productivity-form-grid"><label><span>关联任务</span><select v-model="scheduleForm.taskId"><option value="">不关联</option><option v-for="task in store.tasks" :key="task.id" :value="task.id">{{ store.taskTitle(task) }}</option></select></label><label><span>关联笔记</span><select v-model="scheduleForm.noteId"><option value="">不关联</option><option v-for="note in store.notes" :key="note.id" :value="note.id">{{ note.title || '无标题笔记' }}</option></select></label></div><div class="productivity-form-grid"><label><span>网址</span><input v-model.trim="scheduleForm.url" type="url" placeholder="https://"></label><label><span>链接名称</span><input v-model.trim="scheduleForm.urlLabel" placeholder="例如：打开题库"></label></div><p v-if="scheduleError" class="productivity-form-error">{{ scheduleError }}</p><footer><button v-if="editingScheduleId" type="button" class="danger-text" @click="store.deleteSchedule(editingScheduleId); scheduleOpen = false">删除</button><span></span><button type="button" @click="scheduleOpen = false">取消</button><button class="primary-button" type="submit">保存</button></footer></form></div>
     <div v-if="seriesOpen" class="productivity-modal-backdrop" @click.self="seriesOpen = false">
       <form class="productivity-modal" @submit.prevent="submitSeries">
         <header><div><span>固定日程</span><h2>{{ editingSeriesId ? '编辑规则' : '新建规则' }}</h2></div><button type="button" @click="seriesOpen = false">×</button></header>
@@ -454,7 +482,7 @@ onBeforeUnmount(() => { window.clearInterval(clockTimer); document.removeEventLi
         <div class="productivity-form-grid"><label><span>间隔周期</span><input v-model.number="seriesForm.recurrenceInterval" type="number" min="1" max="99"></label><label v-if="seriesForm.recurrenceType === 'monthly'"><span>每月日期</span><input v-model.number="seriesForm.dayOfMonth" type="number" min="1" max="31"></label><label v-else><span>结束日期（可选）</span><input v-model="seriesForm.until" type="date"></label></div>
         <label v-if="seriesForm.recurrenceType === 'monthly'"><span>结束日期（可选）</span><input v-model="seriesForm.until" type="date"></label>
         <div class="productivity-form-grid"><label><span>时间类型</span><select :value="seriesForm.allDay ? 'allDay' : 'timed'" @change="setSeriesTimeType"><option value="allDay">全天</option><option value="timed">指定开始和结束时间</option></select></label><label><span>提醒方式</span><select v-model="seriesForm.reminderMode"><option value="auto">按日程时间提醒</option><option value="none">不提醒</option></select></label></div>
-        <div v-if="!seriesForm.allDay" class="productivity-form-grid series-clock-fields"><label><span>开始时间</span><input v-model="seriesForm.startTime" type="time" required></label><label><span>结束时间</span><input v-model="seriesForm.endTime" type="time"></label></div>
+        <div v-if="!seriesForm.allDay" class="series-clock-fields"><div v-for="(slot, index) in seriesForm.timeSlots" :key="index" class="productivity-form-grid series-time-slot"><label><span>时间段 {{ index + 1 }} · 开始</span><input v-model="slot.startTime" type="time" required></label><label><span>结束时间（可选）</span><div class="time-slot-end"><input v-model="slot.endTime" type="time"><button v-if="seriesForm.timeSlots.length > 1" type="button" class="danger-text" @click="removeTimeSlot(seriesForm, index)">删除</button></div></label></div><button type="button" class="secondary-button add-time-slot" @click="addTimeSlot(seriesForm)">＋ 添加时间段</button></div>
         <label><span>备注</span><textarea v-model="seriesForm.notes" rows="3"></textarea></label>
         <div class="productivity-form-grid"><label><span>关联任务</span><select v-model="seriesForm.taskId"><option value="">不关联</option><option v-for="task in store.tasks" :key="task.id" :value="task.id">{{ store.taskTitle(task) }}</option></select></label><label><span>关联笔记</span><select v-model="seriesForm.noteId"><option value="">不关联</option><option v-for="note in store.notes" :key="note.id" :value="note.id">{{ note.title || '无标题笔记' }}</option></select></label></div>
         <div class="productivity-form-grid"><label><span>网址</span><input v-model.trim="seriesForm.url" type="url" placeholder="https://"></label><label><span>链接名称</span><input v-model.trim="seriesForm.urlLabel" placeholder="例如：打开题库"></label></div>

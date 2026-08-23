@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from "vue";
 import { useRouter } from "vue-router";
 import { useProductivityStore } from "../stores/productivity";
+import FloatingNoteWorkspace from "./FloatingNoteWorkspace.vue";
 
 interface DocumentPictureInPictureController {
   requestWindow(options?: { width?: number; height?: number; disallowReturnToOpener?: boolean }): Promise<Window>;
@@ -15,6 +16,8 @@ const error = ref("");
 const actionBusy = ref(false);
 const pipWindow = shallowRef<Window | null>(null);
 const pipMount = shallowRef<HTMLElement | null>(null);
+const pipMode = ref<"notes" | "focus">("notes");
+const pipStartOpen = ref(false);
 const form = reactive({ label: "", taskId: "", scheduleEntryId: "", focusMinutes: store.settings.focusMinutes, breakMinutes: store.settings.breakMinutes });
 
 const active = computed(() => store.activeSession);
@@ -39,8 +42,16 @@ const pipStyles = `
   :root { color-scheme: light; font-family: Inter, "Microsoft YaHei", "Segoe UI", sans-serif; }
   :root[data-theme="dark"] { color-scheme: dark; }
   * { box-sizing: border-box; }
+  html, body, #focusPictureInPictureMount { width: 100%; height: 100%; }
   body { margin: 0; min-width: 260px; min-height: 170px; overflow: hidden; background: #f5f7fb; }
-  .focus-pip-card { width: 100vw; min-height: 100vh; display: flex; flex-direction: column; gap: 12px; padding: 17px 18px 15px; color: #172033; background: linear-gradient(145deg,#f8faff 0%,#eef3ff 100%); }
+  .companion-shell { width: 100%; height: 100%; display: flex; flex-direction: column; overflow: hidden; }
+  .companion-tabs { height: 38px; flex: 0 0 auto; display: flex; align-items: center; gap: 4px; padding: 4px 8px; border-bottom: 1px solid #dbe2f0; background: #fff; }
+  .companion-tabs button { height: 29px; padding: 0 12px; border: 0; border-radius: 7px; color: #69758c; background: transparent; font: inherit; font-size: 11px; font-weight: 700; cursor: pointer; }
+  .companion-tabs button.active { color: #2f6ddd; background: #edf3ff; }
+  .companion-tabs button:disabled { opacity: .45; cursor: not-allowed; }
+  .companion-tabs span { min-width: 0; flex: 1; overflow: hidden; color: #69758c; font-size: 10px; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
+  .companion-body { min-width: 0; min-height: 0; flex: 1; overflow: hidden; }
+  .focus-pip-card { width: 100%; height: 100%; display: flex; flex-direction: column; gap: 12px; padding: 17px 18px 15px; color: #172033; background: linear-gradient(145deg,#f8faff 0%,#eef3ff 100%); }
   .focus-pip-heading { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
   .focus-pip-status { display: flex; align-items: center; gap: 7px; color: #3674eb; font-size: 13px; font-weight: 700; }
   .focus-pip-status::before { width: 7px; height: 7px; border-radius: 50%; background: #3674eb; box-shadow: 0 0 0 4px rgba(54,116,235,.12); content: ""; }
@@ -54,6 +65,16 @@ const pipStyles = `
   .focus-pip-actions button.primary { border-color: #3674eb; color: #fff; background: #3674eb; }
   .focus-pip-actions button.danger { color: #d44d5c; }
   .focus-pip-actions button:disabled { opacity: .55; cursor: wait; }
+  .pip-start-backdrop { position: absolute; inset: 38px 0 0; z-index: 20; display: grid; place-items: center; padding: 14px; background: rgba(15,23,42,.34); }
+  .pip-start-form { width: min(360px, 100%); max-height: 100%; overflow: auto; display: grid; gap: 10px; padding: 16px; border: 1px solid #dbe2f0; border-radius: 13px; color: #172033; background: #fff; box-shadow: 0 18px 46px rgba(15,23,42,.24); font-size: 12px; }
+  .pip-start-form h3 { margin: 0 0 3px; font-size: 16px; }
+  .pip-start-form label { display: grid; gap: 4px; color: #69758c; font-size: 11px; font-weight: 650; }
+  .pip-start-form input,.pip-start-form select { min-width: 0; height: 32px; padding: 0 8px; border: 1px solid #dbe2f0; border-radius: 7px; color: #172033; background: #f8faff; font: inherit; }
+  .pip-start-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .pip-start-actions { display: flex; justify-content: flex-end; gap: 7px; margin-top: 3px; }
+  .pip-start-actions button { min-height: 32px; padding: 0 12px; border: 1px solid #dbe2f0; border-radius: 7px; color: #344057; background: #fff; font: inherit; cursor: pointer; }
+  .pip-start-actions button.primary { border-color: #3674eb; color: #fff; background: #3674eb; }
+  .pip-start-error { margin: 0; color: #d44d5c; font-size: 11px; }
   :root[data-theme="dark"] body { background: #101522; }
   :root[data-theme="dark"] .focus-pip-card { color: #e8edf8; background: linear-gradient(145deg,#1c2434 0%,#141b29 100%); }
   :root[data-theme="dark"] .focus-pip-time { color: #f4f7ff; }
@@ -62,6 +83,10 @@ const pipStyles = `
   :root[data-theme="dark"] .focus-pip-actions button:hover { border-color: #6894ed; color: #8db1fa; background: #2b3549; }
   :root[data-theme="dark"] .focus-pip-actions button.primary { color: white; background: #4079e6; }
   :root[data-theme="dark"] .focus-pip-actions button.danger { color: #ff8b97; }
+  :root[data-theme="dark"] .companion-tabs { border-color: #364158; background: #171e2b; }
+  :root[data-theme="dark"] .companion-tabs button { color: #9ca8bd; }
+  :root[data-theme="dark"] .companion-tabs button.active { color: #8db1fa; background: #26334a; }
+  :root[data-theme="dark"] .companion-tabs span { color: #9ca8bd; }
 `;
 
 function pictureInPictureController(): DocumentPictureInPictureController | null {
@@ -75,22 +100,35 @@ function closePictureInPicture() {
   pipTimer = 0;
   pipMount.value = null;
   pipWindow.value = null;
+  pipStartOpen.value = false;
   if (current && !current.closed) current.close();
 }
 
-async function openPictureInPicture() {
+async function openPictureInPicture(mode: "notes" | "focus" = "focus") {
   const current = pipWindow.value;
-  if (current && !current.closed) { current.focus(); return; }
-  if (!active.value) return;
+  pipMode.value = mode;
+  if (current && !current.closed) {
+    if (mode === "notes" && (current.innerWidth < 720 || current.innerHeight < 520)) try { current.resizeTo(980, 720); } catch { /* the user can resize the window manually */ }
+    current.focus(); return;
+  }
+  if (mode === "focus" && !active.value) return;
   const controller = pictureInPictureController();
   if (!controller) {
-    store.toast("当前浏览器不支持悬浮计时器，请使用最新版 Chrome 或 Edge");
+    store.toast("当前浏览器不支持悬浮工作区，请使用最新版 Chrome 或 Edge");
     return;
   }
   try {
-    const floatingWindow = await controller.requestWindow({ width: 340, height: 230, disallowReturnToOpener: false });
-    floatingWindow.document.title = `专注 · ${active.value.label}`;
+    const remembered = JSON.parse(localStorage.getItem("easynote-companion-window-size") || "null") as { width?: number; height?: number } | null;
+    const width = mode === "notes" ? Math.max(720, remembered?.width || 980) : 340;
+    const height = mode === "notes" ? Math.max(520, remembered?.height || 720) : 270;
+    const floatingWindow = await controller.requestWindow({ width, height, disallowReturnToOpener: false });
+    floatingWindow.document.title = mode === "notes" ? "EasyNote 悬浮笔记" : `专注 · ${active.value?.label || "EasyNote"}`;
     floatingWindow.document.documentElement.dataset.theme = document.documentElement.dataset.theme || "light";
+    document.querySelectorAll<HTMLStyleElement | HTMLLinkElement>('style,link[rel="stylesheet"]').forEach((source) => {
+      const clone = source.cloneNode(true) as HTMLStyleElement | HTMLLinkElement;
+      if (source instanceof HTMLLinkElement && clone instanceof HTMLLinkElement) clone.href = source.href;
+      floatingWindow.document.head.append(clone);
+    });
     const style = floatingWindow.document.createElement("style");
     style.textContent = pipStyles;
     const mount = floatingWindow.document.createElement("div");
@@ -100,25 +138,30 @@ async function openPictureInPicture() {
     pipWindow.value = floatingWindow;
     pipMount.value = mount;
     pipTimer = floatingWindow.setInterval(() => { void store.tickTimer(); }, 1000);
+    floatingWindow.addEventListener("resize", () => {
+      if (pipMode.value === "notes") localStorage.setItem("easynote-companion-window-size", JSON.stringify({ width: floatingWindow.innerWidth, height: floatingWindow.innerHeight }));
+    });
     floatingWindow.addEventListener("pagehide", () => {
-      if (pipWindow.value === floatingWindow) { pipTimer = 0; pipMount.value = null; pipWindow.value = null; }
+      if (pipWindow.value === floatingWindow) { pipTimer = 0; pipMount.value = null; pipWindow.value = null; pipStartOpen.value = false; }
     }, { once: true });
   } catch (cause) {
-    if ((cause as DOMException | undefined)?.name !== "NotAllowedError") store.toast("悬浮计时器打开失败，请稍后重试");
+    if ((cause as DOMException | undefined)?.name !== "NotAllowedError") store.toast("悬浮工作区打开失败，请稍后重试");
   }
 }
 
 let timer = 0;
-function showStarter(initial: { label?: string; taskId?: string; scheduleEntryId?: string } = {}) {
+function showStarter(initial: { label?: string; taskId?: string; scheduleEntryId?: string } = {}, showMain = true) {
   error.value = "";
   form.label = initial.label || "";
   form.taskId = initial.taskId || "";
   form.scheduleEntryId = initial.scheduleEntryId || "";
   form.focusMinutes = store.settings.focusMinutes;
   form.breakMinutes = store.settings.breakMinutes;
-  open.value = true;
+  open.value = showMain;
 }
+function showStarterFromPip() { showStarter({}, false); pipStartOpen.value = true; }
 function onStartRequest(event: Event) { showStarter((event as CustomEvent<{ label?: string; taskId?: string; scheduleEntryId?: string }>).detail || {}); }
+function onOpenNotesRequest() { void openPictureInPicture("notes"); }
 function syncLabelFromTask() {
   if (!form.taskId) return;
   const task = store.tasks.find((item) => item.id === form.taskId);
@@ -135,7 +178,7 @@ async function start() {
   try {
     if ("Notification" in window && Notification.permission === "default") void Notification.requestPermission();
     await store.startFocus(form.label, form.taskId, form.scheduleEntryId, Number(form.focusMinutes), Number(form.breakMinutes));
-    open.value = false; expanded.value = true;
+    open.value = false; pipStartOpen.value = false; expanded.value = true;
   } catch (cause) { error.value = cause instanceof Error ? cause.message : "无法启动计时"; }
 }
 
@@ -160,12 +203,14 @@ watch([active, timeLabel], () => {
   document.title = session ? `${timeLabel.value} · ${session.label} | EasyNote` : originalTitle;
   const floatingWindow = pipWindow.value;
   if (session && floatingWindow && !floatingWindow.closed) floatingWindow.document.title = `${timeLabel.value} · ${session.label}`;
-  if (!session && floatingWindow) closePictureInPicture();
+  if (!session && floatingWindow && pipMode.value === "focus") pipMode.value = "notes";
 });
 
 onMounted(() => {
   originalTitle = document.title;
   window.addEventListener("easynote:start-focus", onStartRequest);
+  window.addEventListener("easynote:open-floating-notes", onOpenNotesRequest);
+  document.querySelector("#floatingNotesButton")?.addEventListener("click", onOpenNotesRequest);
   timer = window.setInterval(() => { void store.tickTimer(); }, 1000);
   themeObserver = new MutationObserver(() => {
     if (pipWindow.value && !pipWindow.value.closed) pipWindow.value.document.documentElement.dataset.theme = document.documentElement.dataset.theme || "light";
@@ -175,6 +220,8 @@ onMounted(() => {
 });
 onBeforeUnmount(() => {
   window.removeEventListener("easynote:start-focus", onStartRequest);
+  window.removeEventListener("easynote:open-floating-notes", onOpenNotesRequest);
+  document.querySelector("#floatingNotesButton")?.removeEventListener("click", onOpenNotesRequest);
   window.clearInterval(timer);
   themeObserver?.disconnect();
   document.title = originalTitle;
@@ -189,7 +236,8 @@ onBeforeUnmount(() => {
         <span>{{ phaseLabel }}</span><strong>{{ timeLabel }}</strong><small>{{ active.label }}</small>
       </button>
       <div v-if="expanded" class="focus-mini-actions">
-        <button type="button" class="focus-pip-button" :disabled="actionBusy" @click="openPictureInPicture">{{ pipWindow ? '悬浮窗已打开' : '悬浮到桌面' }}</button>
+        <button type="button" class="focus-pip-button" :disabled="actionBusy" @click="openPictureInPicture('focus')">{{ pipWindow ? '切换到悬浮计时' : '悬浮到桌面' }}</button>
+        <button type="button" class="focus-pip-button" @click="openPictureInPicture('notes')">悬浮笔记工作区</button>
         <button type="button" @click="openFocusHistory">查看记录</button>
         <template v-if="active.phase === 'awaitingBreak'">
           <button type="button" class="focus-break-button" :disabled="actionBusy" @click="beginBreak">开始休息 {{ active.breakMinutes }} 分钟</button>
@@ -204,11 +252,15 @@ onBeforeUnmount(() => {
         <button v-if="active.phase !== 'awaitingBreak'" class="danger-text" type="button" :disabled="actionBusy" @click="abandon">放弃</button>
       </div>
     </template>
-    <button v-else class="focus-start-button" type="button" @click="showStarter()"><span>◷</span> 开始专注</button>
+    <template v-else><button class="focus-start-button" type="button" @click="showStarter()"><span>◷</span> 开始专注</button><button class="floating-notes-launch" type="button" @click="openPictureInPicture('notes')">▣ 悬浮笔记</button></template>
   </aside>
 
-  <Teleport v-if="pipMount && active" :to="pipMount">
-    <main class="focus-pip-card" aria-live="polite">
+  <Teleport v-if="pipMount" :to="pipMount">
+    <div class="companion-shell">
+      <nav class="companion-tabs"><button type="button" :class="{ active: pipMode === 'notes' }" @click="pipMode = 'notes'; pipStartOpen = false">笔记工作区</button><button type="button" :disabled="!active" :class="{ active: pipMode === 'focus' }" @click="pipMode = 'focus'; pipStartOpen = false">专注计时</button><button v-if="pipMode === 'notes' && !active" type="button" class="companion-start" @click="showStarterFromPip">＋ 开始专注</button><span v-if="active">{{ timeLabel }} · {{ active.label }}</span></nav>
+      <div class="companion-body">
+        <FloatingNoteWorkspace v-if="pipMode === 'notes'" @close="closePictureInPicture" />
+        <main v-else-if="active" class="focus-pip-card" aria-live="polite">
       <div class="focus-pip-heading">
         <span class="focus-pip-status">{{ phaseLabel }}</span>
         <strong class="focus-pip-time">{{ timeLabel }}</strong>
@@ -228,7 +280,19 @@ onBeforeUnmount(() => {
           <button class="danger" type="button" :disabled="actionBusy" @click="abandon">放弃</button>
         </template>
       </div>
-    </main>
+        </main>
+        <div v-if="pipStartOpen" class="pip-start-backdrop" @click.self="pipStartOpen = false">
+          <form class="pip-start-form" @submit.prevent="start">
+            <h3>开始专注计时</h3>
+            <label><span>本轮名称</span><input v-model.trim="form.label" required maxlength="100" placeholder="例如：算法题练习"></label>
+            <div class="pip-start-grid"><label><span>关联任务</span><select v-model="form.taskId" @change="syncLabelFromTask"><option value="">不关联任务</option><option v-for="task in unfinishedTasks" :key="task.id" :value="task.id">{{ store.taskTitle(task) }}</option></select></label><label><span>关联日程</span><select v-model="form.scheduleEntryId" @change="syncLabelFromSchedule"><option value="">不关联日程</option><option v-for="entry in availableSchedules" :key="entry.id" :value="entry.id">{{ entry.date }} · {{ entry.title }}</option></select></label></div>
+            <div class="pip-start-grid"><label><span>专注分钟</span><input v-model.number="form.focusMinutes" type="number" min="1" max="480" required></label><label><span>休息分钟</span><input v-model.number="form.breakMinutes" type="number" min="1" max="120" required></label></div>
+            <p v-if="error" class="pip-start-error">{{ error }}</p>
+            <div class="pip-start-actions"><button type="button" @click="pipStartOpen = false">取消</button><button class="primary" type="submit">开始计时</button></div>
+          </form>
+        </div>
+      </div>
+    </div>
   </Teleport>
 
   <div v-if="open" class="productivity-modal-backdrop" @click.self="open = false">

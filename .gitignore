@@ -1,10 +1,36 @@
+# 备份目录
 EasyNote-Backups/
+
+# Node依赖
 node_modules/
+
+# 编译输出
 dist/
+
+# 测试覆盖率
 coverage/
+
+# Playwright测试产物
 playwright-report/
 test-results/
+
+# 日志、ts编译缓存
 *.log
 *.tsbuildinfo
+
+# macOS / Windows系统文件
 .DS_Store
 Thumbs.db
+
+# Local recovery and diagnostic data
+EasyNote-Restore-*.json
+edge-db-snapshot/
+edge-indexeddb-report.txt
+
+# 输出、临时、恢复目录
+output/
+recovery/
+tmp/
+
+# powershell脚本
+check-edge-data.ps1

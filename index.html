@@ -38,6 +38,9 @@
           <button class="icon-button layout-button" id="layoutButton" aria-label="调整页面布局" title="页面布局">
             <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M9 4v16M15 4v16" /></svg>
           </button>
+          <button class="icon-button floating-notes-button" id="floatingNotesButton" aria-label="打开悬浮笔记工作区" title="悬浮笔记工作区">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 9h10M7 13h7"/></svg>
+          </button>
           <button class="icon-button" id="themeToggle" aria-label="切换深色模式" title="切换主题">
             <svg class="sun-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.66 6.34l1.41-1.41" /></svg>
           </button>
@@ -259,7 +262,7 @@
                 <button class="text-button editor-view-button" id="outlineButton" title="显示或隐藏大纲">
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11"/><circle cx="4" cy="6" r="1" fill="currentColor" stroke="none"/><circle cx="4" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="4" cy="18" r="1" fill="currentColor" stroke="none"/></svg><span>大纲</span>
                 </button>
-                <button class="text-button" id="modeToggle" title="切换编辑模式">Markdown</button>
+                <button class="text-button" id="modeToggle" title="切换 Markdown 模式；Mermaid 示例：```mermaid\nflowchart TD\nA[开始] --> B[结束]\n```">Markdown</button>
                 <button class="icon-button" id="favoriteButton" aria-label="收藏笔记" title="收藏">
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-2.9-5.6 2.9 1.1-6.2L3 9.6l6.2-.9z" /></svg>
                 </button>
@@ -300,7 +303,7 @@
               </div>
 
               <div class="content-editor" id="contentEditor" data-context="editor-content" contenteditable="true" data-placeholder="开始写下你的想法…" spellcheck="true"></div>
-              <textarea class="markdown-editor" id="markdownEditor" aria-label="Markdown 编辑器" placeholder="# 开始写作…" hidden></textarea>
+              <textarea class="markdown-editor" id="markdownEditor" aria-label="Markdown 编辑器" placeholder="# 开始写作…&#10;&#10;```mermaid&#10;flowchart TD&#10;A[开始] --> B[结束]&#10;```" hidden></textarea>
               <div class="image-drop-hint" id="imageDropHint"><span>释放以插入图片</span></div>
               <div class="image-resize-overlay" id="imageResizeOverlay" hidden>
                 <span class="image-size-label" id="imageSizeLabel"></span>
@@ -365,6 +368,11 @@
           <button class="dialog-close" id="safetyClose" type="button" aria-label="关闭">×</button>
         </header>
         <div class="safety-scroll">
+          <section class="safety-guide">
+            <strong>怎么用数据安全中心</strong>
+            <p>先点击“导出便携式完整 JSON”留一份可恢复备份；平时可申请持久存储、选择备份目录并点击“立即备份”。遇到保存失败时，先点“重试失败写入”，仍失败就使用“仅导出当前内存快照”。</p>
+          </section>
+          <div class="safety-action-result" id="safetyActionResult" hidden role="status" aria-live="polite"></div>
           <div class="safety-alert" id="protocolAlert" hidden>
             <strong>当前仍通过本地文件打开</strong>
             <p>请先导出迁移备份，再运行 start-easynote.bat。旧数据不会被自动删除。</p>
@@ -378,7 +386,11 @@
           </div>
           <section class="safety-section">
             <div><h3>存储保护</h3><p>申请持久存储可降低浏览器自动清理站点数据的风险。</p></div>
-            <div class="safety-actions"><button class="secondary-button" id="requestPersistenceButton">申请持久存储</button><button class="secondary-button" id="runIntegrityButton">重新检查完整性</button><button class="secondary-button" id="retrySaveButton">重试失败写入</button></div>
+            <div class="safety-actions"><button class="secondary-button" id="requestPersistenceButton">申请持久存储</button><button class="secondary-button" id="runIntegrityButton">重新检查完整性</button><button class="secondary-button" id="retrySaveButton">重试失败写入</button><button class="secondary-button" id="repairAttachmentsButton">从自动备份修复附件</button></div>
+          </section>
+          <section class="safety-diagnostic" id="safetyDiagnostic" hidden>
+            <strong>诊断信息</strong>
+            <p id="safetyDiagnosticText"></p>
           </section>
           <section class="safety-section">
             <div><h3>自动多代备份</h3><p>有变更时每 10 分钟生成 JSON 快照，附件按内容哈希去重保存。</p></div>
@@ -393,7 +405,7 @@
             <div class="history-list" id="recoveryList"><p class="safety-empty">暂无可恢复内容。</p></div>
           </section>
         </div>
-        <footer class="safety-footer"><button class="secondary-button" id="portableExportButton">导出便携式完整 JSON</button><span id="safetyUpdatedAt"></span></footer>
+        <footer class="safety-footer"><div class="safety-footer-actions"><button class="secondary-button" id="portableExportButton">导出便携式完整 JSON</button><button class="secondary-button" id="emergencyExportButton">仅导出当前内存快照</button></div><span id="safetyUpdatedAt"></span></footer>
       </section>
     </div>
     <div class="migration-banner" id="migrationBanner" hidden>

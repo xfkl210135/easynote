@@ -3,6 +3,13 @@
 
   const DB_NAME = "easynote-db";
   const DB_VERSION = 8;
+  const RESCUE_DB_NAME = "easynote-rescue-db";
+  const RESCUE_DB_VERSION = 1;
+  const RESCUE_STORE = "snapshots";
+  const RESCUE_ARCHIVE_LIMIT = 12;
+  const RESCUE_ARCHIVE_INTERVAL = 10 * 60 * 1000;
+  const LOCAL_AUTOMATIC_BACKUP_ENDPOINT = "/__easynote/automatic-backup";
+  const LOCAL_RECOVERY_CANDIDATE_ENDPOINT = "/__easynote/recovery-candidate";
   const DAY = 86400000;
   const HISTORY_LIMIT = 50;
   const HISTORY_AGE = 30 * DAY;
@@ -14,6 +21,15 @@
     tasks: "tasks", taskFields: "taskFields", taskViews: "taskViews", taskHistory: "taskHistory",
     scheduleEntries: "scheduleEntries", scheduleSeries: "scheduleSeries", scheduleOccurrenceStates: "scheduleOccurrenceStates", scheduleDailyNotes: "scheduleDailyNotes", whiteboards: "whiteboards",
     focusSessions: "focusSessions", reviews: "reviews", goals: "goals", milestones: "milestones"
+  };
+  const scheduleTimeSlots = (item) => {
+    if (item?.allDay !== false) return [];
+    const source = Array.isArray(item?.timeSlots) ? item.timeSlots : [];
+    const slots = source.map((slot) => ({ startTime: String(slot?.startTime || ""), endTime: String(slot?.endTime || "") }))
+      .filter((slot) => /^\d{2}:\d{2}$/.test(slot.startTime))
+      .filter((slot) => !slot.endTime || /^\d{2}:\d{2}$/.test(slot.endTime))
+      .filter((slot) => !slot.endTime || slot.endTime > slot.startTime);
+    return slots.length ? slots : (item?.startTime ? [{ startTime: item.startTime, endTime: item.endTime || "" }] : []);
   };
 
   const makeId = (prefix = "id") => `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
@@ -27,6 +43,24 @@
     transaction.onerror = () => reject(transaction.error || new Error("IndexedDB transaction failed"));
     transaction.onabort = () => reject(transaction.error || new Error("IndexedDB transaction aborted"));
   });
+
+  function openRescueDatabase() {
+    return new Promise((resolve, reject) => {
+      const request = indexedDB.open(RESCUE_DB_NAME, RESCUE_DB_VERSION);
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        if (!db.objectStoreNames.contains(RESCUE_STORE)) db.createObjectStore(RESCUE_STORE, { keyPath: "id" });
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error || new Error("Unable to open the EasyNote rescue database"));
+    });
+  }
+
+  async function rescueGet(key) {
+    const db = await openRescueDatabase();
+    try { return await requestResult(db.transaction(RESCUE_STORE, "readonly").objectStore(RESCUE_STORE).get(key)); }
+    finally { db.close(); }
+  }
 
   function stableValue(value) {
     if (Array.isArray(value)) return value.map(stableValue);
@@ -43,7 +77,14 @@
 
   async function sha256(value) {
     let buffer;
-    if (value instanceof Blob) buffer = await value.arrayBuffer();
+    if (value instanceof Blob) {
+      buffer = typeof value.arrayBuffer === "function" ? await value.arrayBuffer() : await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(reader.error || new Error("附件读取失败"));
+        reader.readAsArrayBuffer(value);
+      });
+    }
     else if (value instanceof ArrayBuffer) buffer = value;
     else buffer = new TextEncoder().encode(String(value));
     const digest = await crypto.subtle.digest("SHA-256", buffer);
@@ -89,6 +130,13 @@
       this.lastError = null;
       this.lastStatus = "saved";
       this.autoBackupTimer = null;
+      this.localBackupTimer = null;
+      this.localBackupPromise = null;
+      this.pendingLocalBackupSnapshot = null;
+      this.lastProtectionError = null;
+      this.lastRescueSnapshotAt = null;
+      this.lastLocalBackup = null;
+      this.restoredFromRescue = false;
       this.integrityReport = null;
       this.backupDirectoryHandle = null;
       this.wasEmpty = false;
@@ -265,6 +313,212 @@
       await transactionDone(transaction);
     }
 
+    rescueChecksumPayload(snapshot) {
+      return {
+        version: snapshot.version,
+        createdAt: snapshot.createdAt,
+        commit: snapshot.commit || null,
+        data: snapshot.data,
+        safetyArchive: snapshot.safetyArchive,
+        attachments: (snapshot.attachments || []).map(({ blob, ...metadata }) => metadata)
+      };
+    }
+
+    async buildRescueSnapshot() {
+      const [notes, folders, files, tasks, taskFields, taskViews, scheduleEntries, scheduleSeries, scheduleOccurrenceStates, scheduleDailyNotes, whiteboards, focusSessions, reviews, goals, milestones, attachments, noteHistory, taskHistory, recovery, commit] = await Promise.all([
+        this.getAll(STORES.notes), this.getAll(STORES.folders), this.getAll(STORES.files), this.getAll(STORES.tasks),
+        this.getAll(STORES.taskFields), this.getAll(STORES.taskViews), this.getAll(STORES.scheduleEntries), this.getAll(STORES.scheduleSeries),
+        this.getAll(STORES.scheduleOccurrenceStates), this.getAll(STORES.scheduleDailyNotes), this.getAll(STORES.whiteboards),
+        this.getAll(STORES.focusSessions), this.getAll(STORES.reviews), this.getAll(STORES.goals), this.getAll(STORES.milestones),
+        this.getAll(STORES.attachments), this.getAll(STORES.history), this.getAll(STORES.taskHistory), this.getAll(STORES.recovery),
+        this.get(STORES.meta, "lastCommit")
+      ]);
+      const snapshot = {
+        version: 1,
+        createdAt: isoNow(),
+        commit: commit || null,
+        data: { version: 8, notes, categories: folders, files, tasks, taskFields, taskViews, scheduleEntries, scheduleSeries, scheduleOccurrenceStates, scheduleDailyNotes, whiteboards, focusSessions, reviews, goals, milestones },
+        safetyArchive: { noteHistory, taskHistory, recovery },
+        attachments
+      };
+      snapshot.checksum = await sha256(stableStringify(this.rescueChecksumPayload(snapshot)));
+      return snapshot;
+    }
+
+    async validateRescueSnapshot(snapshot, verifyAttachmentHashes = false) {
+      if (!snapshot || snapshot.version !== 1 || !Array.isArray(snapshot.data?.notes) || !Array.isArray(snapshot.data?.categories) || !Array.isArray(snapshot.attachments)) throw new Error("The EasyNote rescue snapshot structure is invalid");
+      const checksum = await sha256(stableStringify(this.rescueChecksumPayload(snapshot)));
+      if (checksum !== snapshot.checksum) throw new Error("The EasyNote rescue snapshot checksum is invalid");
+      const attachmentIds = new Set();
+      for (const attachment of snapshot.attachments) {
+        if (!attachment?.id || !(attachment.blob instanceof Blob) || attachment.blob.size !== attachment.size) throw new Error("An attachment in the EasyNote rescue snapshot is incomplete");
+        if (verifyAttachmentHashes && await sha256(attachment.blob) !== attachment.sha256) throw new Error("An attachment in the EasyNote rescue snapshot failed verification");
+        attachmentIds.add(attachment.id);
+      }
+      for (const note of snapshot.data.notes) {
+        const template = document.createElement("template");
+        template.innerHTML = note.content || "";
+        for (const image of template.content.querySelectorAll("img[data-attachment-id]")) if (!attachmentIds.has(image.dataset.attachmentId)) throw new Error(`Rescue snapshot is missing an image used by note ${note.title || note.id}`);
+      }
+      return true;
+    }
+
+    async writeRescueSnapshot() {
+      const snapshot = await this.buildRescueSnapshot();
+      const rescueDb = await openRescueDatabase();
+      try {
+        const existing = await requestResult(rescueDb.transaction(RESCUE_STORE, "readonly").objectStore(RESCUE_STORE).getAll());
+        const archives = existing.filter((item) => item.id !== "latest").sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+        const makeArchive = !archives[0] || Date.now() - new Date(archives[0].createdAt).getTime() >= RESCUE_ARCHIVE_INTERVAL;
+        const transaction = rescueDb.transaction(RESCUE_STORE, "readwrite");
+        const store = transaction.objectStore(RESCUE_STORE);
+        store.put({ ...snapshot, id: "latest" });
+        if (makeArchive) store.put({ ...snapshot, id: `archive-${snapshot.createdAt}` });
+        const retainedIds = new Set(archives.slice(0, Math.max(0, RESCUE_ARCHIVE_LIMIT - (makeArchive ? 1 : 0))).map((item) => item.id));
+        for (const archive of archives) if (!retainedIds.has(archive.id)) store.delete(archive.id);
+        await transactionDone(transaction);
+      } finally { rescueDb.close(); }
+      const verified = await rescueGet("latest");
+      await this.validateRescueSnapshot(verified, false);
+      if (verified.checksum !== snapshot.checksum || verified.data.notes.length !== snapshot.data.notes.length || verified.attachments.length !== snapshot.attachments.length) throw new Error("The EasyNote rescue snapshot could not be verified after writing");
+      this.lastRescueSnapshotAt = snapshot.createdAt;
+      await this.put(STORES.meta, { key: "lastRescueSnapshot", createdAt: snapshot.createdAt, checksum: snapshot.checksum, notes: snapshot.data.notes.length, attachments: snapshot.attachments.length });
+      this.emitSafety({ rescueCompleted: true, createdAt: snapshot.createdAt });
+      return snapshot;
+    }
+
+    async restoreLatestRescue() {
+      const snapshot = await rescueGet("latest");
+      if (!snapshot) return false;
+      await this.validateRescueSnapshot(snapshot, true);
+      const attachmentTransaction = this.db.transaction(STORES.attachments, "readwrite");
+      for (const attachment of snapshot.attachments) attachmentTransaction.objectStore(STORES.attachments).put(attachment);
+      await transactionDone(attachmentTransaction);
+      snapshot.attachments.forEach((attachment) => this.attachmentRecords.set(attachment.id, attachment));
+      await this.saveState(structuredClone(snapshot.data), "rescue-restore");
+      for (const [storeName, records] of [[STORES.history, snapshot.safetyArchive?.noteHistory], [STORES.taskHistory, snapshot.safetyArchive?.taskHistory], [STORES.recovery, snapshot.safetyArchive?.recovery]]) {
+        if (!Array.isArray(records) || !records.length) continue;
+        const transaction = this.db.transaction(storeName, "readwrite");
+        records.forEach((record) => transaction.objectStore(storeName).put(record));
+        await transactionDone(transaction);
+      }
+      this.restoredFromRescue = true;
+      await this.put(STORES.meta, { key: "rescueRestored", createdAt: isoNow(), sourceCreatedAt: snapshot.createdAt, checksum: snapshot.checksum });
+      this.emitSafety({ rescueRestored: true, createdAt: snapshot.createdAt });
+      return true;
+    }
+
+    localAutomaticBackupAvailable() {
+      return location.protocol === "http:" && (location.hostname === "localhost" || location.hostname === "127.0.0.1");
+    }
+
+    async restoreLocalAutomaticBackup({ minimumNoteCount = 0, replacedState = null } = {}) {
+      if (!this.localAutomaticBackupAvailable()) return null;
+      const response = await fetch(LOCAL_RECOVERY_CANDIDATE_ENDPOINT, { cache: "no-store" });
+      if (response.status === 404) return null;
+      if (!response.ok) throw new Error(`Local recovery candidate failed (HTTP ${response.status})`);
+      if (!String(response.headers.get("content-type") || "").toLowerCase().includes("application/json")) return null;
+      const archive = await response.json();
+      if (archive?.format !== "easynote-portable" || Number(archive.version) !== 8 || !Array.isArray(archive.notes) || !Array.isArray(archive.categories)) throw new Error("The local recovery candidate is invalid");
+      if (archive.notes.length <= minimumNoteCount) return null;
+      if (replacedState) await this.recordRecovery("local-automatic-recovery", "自动恢复前的示例数据", structuredClone(replacedState));
+      const saved = await this.queueSave(structuredClone(archive), true, "rescue-restore");
+      if (!saved) throw new Error("The local recovery candidate could not be saved and verified");
+      this.wasEmpty = false;
+      this.restoredFromRescue = true;
+      await this.put(STORES.meta, { key: "localAutomaticRecovery", createdAt: isoNow(), notes: archive.notes.length, exportedAt: archive.exportedAt || null });
+      const recovered = await this.load(true);
+      if (!recovered || recovered.notes.length !== archive.notes.length) throw new Error("The local recovery candidate failed the final read-back check");
+      this.emitSafety({ localAutomaticRecovery: true, notes: recovered.notes.length });
+      return recovered;
+    }
+
+    async repairMissingAttachments(state) {
+      if (!this.localAutomaticBackupAvailable()) throw new Error("请在 localhost 安全启动模式下使用附件修复");
+      const response = await fetch(LOCAL_RECOVERY_CANDIDATE_ENDPOINT, { cache: "no-store" });
+      if (response.status === 404) throw new Error("没有找到可用的自动备份");
+      if (!response.ok || !String(response.headers.get("content-type") || "").toLowerCase().includes("application/json")) throw new Error("自动备份读取失败");
+      const archive = await response.json();
+      if (archive?.format !== "easynote-portable" || !Array.isArray(archive.notes)) throw new Error("自动备份格式无效");
+      const archivedNotes = new Map(archive.notes.map((note) => [note.id, note]));
+      let repaired = 0;
+      for (const note of state?.notes || []) {
+        const source = archivedNotes.get(note.id);
+        if (!source) continue;
+        const currentTemplate = document.createElement("template"); currentTemplate.innerHTML = note.content || "";
+        const sourceTemplate = document.createElement("template"); sourceTemplate.innerHTML = source.content || "";
+        const sourceImages = new Map();
+        sourceTemplate.content.querySelectorAll("img[data-attachment-id]").forEach((image) => { const id = image.dataset.attachmentId; const src = image.getAttribute("src") || ""; if (id && src.startsWith("data:")) sourceImages.set(id, { src, alt: image.alt || "笔记图片" }); });
+        for (const image of currentTemplate.content.querySelectorAll("img[data-attachment-id]")) {
+          const id = image.dataset.attachmentId || "";
+          if (id && this.getAttachmentBlob(id)) continue;
+          const replacement = sourceImages.get(id);
+          if (!replacement) continue;
+          const attachment = await this.resolveInlineAttachment(replacement.src, "", { name: replacement.alt });
+          image.dataset.attachmentId = attachment.id; image.src = attachment.url; image.removeAttribute("data-attachment-missing"); repaired++;
+        }
+        note.content = currentTemplate.innerHTML;
+      }
+      if (!repaired) return { repaired: 0, state };
+      if (!await this.queueSave(state, true, "rescue-restore")) throw new Error(this.lastError?.message || "修复后的附件无法保存");
+      const recovered = await this.load(true);
+      return { repaired, state: recovered || state };
+    }
+
+    scheduleLocalAutomaticBackup(snapshot, immediate = false) {
+      if (!this.localAutomaticBackupAvailable()) return;
+      this.pendingLocalBackupSnapshot = snapshot;
+      clearTimeout(this.localBackupTimer);
+      if (immediate) return this.runLocalAutomaticBackup();
+      this.localBackupTimer = setTimeout(() => this.runLocalAutomaticBackup(), 1500);
+    }
+
+    async runLocalAutomaticBackup() {
+      clearTimeout(this.localBackupTimer);
+      if (this.localBackupPromise || !this.pendingLocalBackupSnapshot) return this.localBackupPromise;
+      const snapshot = this.pendingLocalBackupSnapshot;
+      this.pendingLocalBackupSnapshot = null;
+      this.localBackupPromise = (async () => {
+        const portable = await this.exportPortable(snapshot.data);
+        const response = await fetch(LOCAL_AUTOMATIC_BACKUP_ENDPOINT, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-EasyNote-Backup": "automatic-v1" },
+          body: JSON.stringify(portable),
+          cache: "no-store"
+        });
+        if (!response.ok) throw new Error(`Local automatic backup failed (HTTP ${response.status})`);
+        const result = await response.json();
+        if (!result?.ok || !result?.createdAt || !result?.checksum) throw new Error("The local automatic backup response is invalid");
+        this.lastLocalBackup = result;
+        await this.put(STORES.meta, { key: "lastLocalAutomaticBackup", ...result });
+        this.emitSafety({ localBackupCompleted: true, createdAt: result.createdAt });
+        return result;
+      })().catch((error) => {
+        this.lastProtectionError = error;
+        this.emitSafety({ backupError: String(error?.message || error) });
+        return null;
+      }).finally(() => {
+        this.localBackupPromise = null;
+        if (this.pendingLocalBackupSnapshot) this.runLocalAutomaticBackup();
+      });
+      return this.localBackupPromise;
+    }
+
+    async protectCommittedState(result, reason) {
+      try {
+        const rescueSnapshot = await this.writeRescueSnapshot();
+        this.lastProtectionError = null;
+        const localBackup = this.scheduleLocalAutomaticBackup(rescueSnapshot, ["manual", "switch", "danger", "import", "migration", "rescue-restore"].includes(reason));
+        if (localBackup) await localBackup;
+        return { ...result, rescueCreatedAt: rescueSnapshot.createdAt };
+      } catch (error) {
+        this.lastProtectionError = error;
+        console.error("EasyNote rescue snapshot failed", error);
+        this.emitSafety({ rescueError: String(error?.message || error) });
+        return { ...result, protectionWarning: String(error?.message || error) };
+      }
+    }
+
     async load(captureBaselines = true) {
       await this.open();
       this.backupDirectoryHandle = (await this.get(STORES.settings, "backupDirectory"))?.value || null;
@@ -275,6 +529,7 @@
         notes = await this.getAll(STORES.notes);
         await this.put(STORES.meta, { key: "migration", state: "verified", migratedAt: isoNow(), source: "app-state/main", legacyRetained: true });
       }
+      if (!notes.length && await this.restoreLatestRescue()) notes = await this.getAll(STORES.notes);
       const attachments = await this.getAll(STORES.attachments);
       attachments.forEach((record) => this.attachmentRecords.set(record.id, record));
       const [folders, files, tasks, taskFields, taskViews, scheduleEntries, scheduleSeries, scheduleOccurrenceStates, scheduleDailyNotes, whiteboards, focusSessions, reviews, goals, milestones] = await Promise.all([
@@ -359,14 +614,57 @@
       return { ...verified, url: this.getAttachmentUrl(record.id) };
     }
 
+    async resolveInlineAttachment(dataUrl, existingId = "", metadata = {}) {
+      if (existingId) {
+        const existing = this.attachmentRecords.get(existingId) || await this.get(STORES.attachments, existingId);
+        if (existing?.blob) {
+          this.attachmentRecords.set(existing.id, existing);
+          return { ...existing, url: this.getAttachmentUrl(existing.id) };
+        }
+      }
+      return this.putAttachment(dataUrlToBlob(dataUrl), metadata);
+    }
+
+    async verifyAttachmentReferences(state, decodeImages = false) {
+      const referenced = new Map();
+      const remember = (id, label, image = false) => { if (id) referenced.set(id, { label, image: image || referenced.get(id)?.image }); };
+      for (const note of state.notes || []) {
+        const template = document.createElement("template");
+        template.innerHTML = note.content || "";
+        template.content.querySelectorAll("img[data-attachment-id]").forEach((image) => remember(image.dataset.attachmentId, `note ${note.title || note.id}`, true));
+      }
+      for (const file of state.files || []) remember(file.attachmentId, `file ${file.name || file.id}`);
+      for (const task of state.tasks || []) for (const value of Object.values(task.values || {})) if (Array.isArray(value)) for (const item of value) remember(item?.attachmentId, `task attachment ${item?.name || task.id}`);
+      for (const board of state.whiteboards || []) for (const node of board.nodes || []) if (node.type === "image") remember(node.attachmentId, `whiteboard image ${node.title || node.id}`, true);
+      for (const [id, descriptor] of referenced) {
+        const record = this.attachmentRecords.get(id) || await this.get(STORES.attachments, id);
+        if (!record?.blob || record.blob.size !== record.size) throw new Error(`Missing or incomplete attachment: ${descriptor.label}`);
+        if (await sha256(record.blob) !== record.sha256) throw new Error(`Attachment checksum failed: ${descriptor.label}`);
+        this.attachmentRecords.set(id, record);
+        if (decodeImages && descriptor.image) {
+          const url = URL.createObjectURL(record.blob);
+          try {
+            await new Promise((resolve, reject) => {
+              const image = new Image();
+              image.onload = () => image.naturalWidth > 0 && image.naturalHeight > 0 ? resolve(true) : reject(new Error("decoded image has no dimensions"));
+              image.onerror = () => reject(new Error("browser could not decode image"));
+              image.src = url;
+            });
+          } catch (error) { throw new Error(`Image cannot be displayed (${descriptor.label}): ${error?.message || error}`); }
+          finally { URL.revokeObjectURL(url); }
+        }
+      }
+      return { referenced: referenced.size };
+    }
+
     async prepareInlineAttachments(snapshot) {
       for (const note of snapshot.notes || []) {
         const template = document.createElement("template");
         template.innerHTML = note.content || "";
         for (const image of template.content.querySelectorAll("img")) {
           const source = image.getAttribute("src") || "";
-          if (!image.dataset.attachmentId && source.startsWith("data:image/")) {
-            const attachment = await this.putAttachment(dataUrlToBlob(source), { name: image.alt || "笔记图片" });
+          if (source.startsWith("data:image/")) {
+            const attachment = await this.resolveInlineAttachment(source, image.dataset.attachmentId || "", { name: image.alt || "笔记图片" });
             image.dataset.attachmentId = attachment.id;
             image.src = attachment.url;
           }
@@ -374,8 +672,8 @@
         note.content = template.innerHTML;
       }
       for (const file of snapshot.files || []) {
-        if (!file.attachmentId && file.dataUrl) {
-          const attachment = await this.putAttachment(dataUrlToBlob(file.dataUrl), { name: file.name, type: file.type });
+        if (file.dataUrl) {
+          const attachment = await this.resolveInlineAttachment(file.dataUrl, file.attachmentId || "", { name: file.name, type: file.type });
           file.attachmentId = attachment.id;
           file.size = attachment.size;
           delete file.dataUrl;
@@ -396,8 +694,8 @@
       }
       for (const board of snapshot.whiteboards || []) {
         for (const node of board.nodes || []) {
-          if (node.type !== "image" || node.attachmentId || !node.dataUrl) continue;
-          const attachment = await this.putAttachment(dataUrlToBlob(node.dataUrl), { name: node.title || "白板图片" });
+          if (node.type !== "image" || !node.dataUrl) continue;
+          const attachment = await this.resolveInlineAttachment(node.dataUrl, node.attachmentId || "", { name: node.title || "白板图片" });
           node.attachmentId = attachment.id;
           delete node.dataUrl;
         }
@@ -420,10 +718,10 @@
         width: Math.max(140, Number(node.width) || (node.type === "group" ? 460 : 260)), height: Math.max(80, Number(node.height) || (node.type === "group" ? 300 : 160)),
         zIndex: Number.isFinite(node.zIndex) ? node.zIndex : index + 1, color: color(node.color), groupId: node.groupId || "",
         text: node.text || "", noteId: node.noteId || "", taskId: node.taskId || "", attachmentId: node.attachmentId || "", url: node.url || "", title: node.title || ""
-      }), STORES.scheduleEntries, "schedule");
+      }));
       const edges = (Array.isArray(board.edges) ? board.edges : []).map((edge) => ({
         id: edge.id, sourceId: edge.sourceId || "", targetId: edge.targetId || "", sourceSide: sides.has(edge.sourceSide) ? edge.sourceSide : "right", targetSide: sides.has(edge.targetSide) ? edge.targetSide : "left", color: color(edge.color)
-      }), STORES.scheduleSeries, "scheduleSeries");
+      }));
       const viewport = board.viewport && typeof board.viewport === "object" ? board.viewport : {};
       return {
         id: board.id, title: board.title || "未命名白板", nodes, edges,
@@ -549,6 +847,7 @@
       const scheduleResult = await prepareVersioned(snapshot.scheduleEntries, scheduleMap, (entry) => ({
         id: entry.id, title: entry.title || "未命名日程", date: entry.date || "", allDay: entry.allDay !== false,
         startTime: entry.allDay === false ? entry.startTime || "" : "", endTime: entry.allDay === false ? entry.endTime || "" : "",
+        timeSlots: scheduleTimeSlots(entry),
         notes: entry.notes || "", color: entry.color || "#4f7df3", completed: Boolean(entry.completed), taskId: entry.taskId || "", noteId: entry.noteId || "", url: entry.url || "", urlLabel: entry.urlLabel || "",
         reminderMode: ["auto", "none", "custom"].includes(entry.reminderMode) ? entry.reminderMode : "auto",
         customReminderAt: entry.reminderMode === "custom" ? entry.customReminderAt || "" : "",
@@ -561,6 +860,7 @@
       const scheduleSeriesResult = await prepareVersioned(snapshot.scheduleSeries, scheduleSeriesMap, (series) => ({
         id: series.id, title: series.title || "未命名固定日程", startDate: series.startDate || "", allDay: series.allDay !== false,
         startTime: series.allDay === false ? series.startTime || "" : "", endTime: series.allDay === false ? series.endTime || "" : "",
+        timeSlots: scheduleTimeSlots(series),
         notes: series.notes || "", color: series.color || "#4f7df3", taskId: series.taskId || "", noteId: series.noteId || "", url: series.url || "", urlLabel: series.urlLabel || "", reminderMode: series.reminderMode === "none" ? "none" : "auto",
         recurrenceType: ["daily", "weekdays", "weekly", "monthly"].includes(series.recurrenceType) ? series.recurrenceType : "daily",
         recurrenceInterval: Math.max(1, Number(series.recurrenceInterval) || 1), weekdays: Array.isArray(series.weekdays) ? [...new Set(series.weekdays.map(Number).filter((day) => day >= 0 && day <= 6))].sort() : [],
@@ -708,7 +1008,8 @@
         this.pendingReason = "auto";
         this.emitStatus("saving");
         try {
-          const result = await this.saveState(snapshot, reason);
+          let result = await this.saveState(snapshot, reason);
+          result = await this.protectCommittedState(result, reason);
           this.emitStatus(this.pendingSnapshot ? "dirty" : "saved", { verifiedAt: result.committedAt, conflicts: result.conflicts?.length || 0 });
           if (result.conflicts?.length) window.dispatchEvent(new CustomEvent("easynote:sync-conflict", { detail: { conflicts: result.conflicts } }));
           if (result.totalChanges || result.conflicts?.length || result.reason === "danger") this.broadcastCommit(result);
@@ -728,6 +1029,8 @@
     async flush() {
       if (this.pendingSnapshot) await this.drainSaveQueue();
       while (this.saving) await new Promise((resolve) => setTimeout(resolve, 25));
+      if (this.pendingLocalBackupSnapshot) await this.runLocalAutomaticBackup();
+      if (this.localBackupPromise) await this.localBackupPromise;
       return !this.pendingSnapshot && !this.lastError;
     }
 
@@ -838,12 +1141,12 @@
       return permission;
     }
 
-    async chooseBackupDirectory() {
+    async chooseBackupDirectory({ backup = true } = {}) {
       if (!window.showDirectoryPicker) throw new Error("当前浏览器不支持自动目录备份，请使用最新版 Edge 或 Chrome");
       const handle = await window.showDirectoryPicker({ id: "easynote-backups", mode: "readwrite", startIn: "documents" });
       this.backupDirectoryHandle = handle;
       await this.put(STORES.settings, { key: "backupDirectory", value: handle, selectedAt: isoNow() });
-      await this.backupNow();
+      if (backup) await this.backupNow();
       return handle.name;
     }
 
@@ -975,35 +1278,44 @@
       return { name: jsonName, createdAt: parsed.createdAt, notes: parsed.data.notes.length, tasks: parsed.data.tasks?.length || 0, schedules: parsed.data.scheduleEntries?.length || 0, whiteboards: parsed.data.whiteboards?.length || 0 };
     }
 
-    async exportPortable(state) {
+    async exportPortable(state, { allowMissingAttachments = false } = {}) {
       const snapshot = await this.prepareInlineAttachments(structuredClone(state));
       const dataUrlCache = new Map();
+      const missingAttachments = new Set();
+      const missingImageDataUrl = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
       const getDataUrl = async (id) => {
         if (!dataUrlCache.has(id)) {
           const blob = this.getAttachmentBlob(id) || (await this.get(STORES.attachments, id))?.blob;
-          if (!blob) throw new Error(`附件 ${id} 缺失`);
-          dataUrlCache.set(id, await blobToDataUrl(blob));
+          if (!blob) {
+            if (!allowMissingAttachments) throw new Error(`附件 ${id} 缺失`);
+            missingAttachments.add(id || "unknown");
+            dataUrlCache.set(id, missingImageDataUrl);
+          } else dataUrlCache.set(id, await blobToDataUrl(blob));
         }
         return dataUrlCache.get(id);
       };
       for (const note of snapshot.notes || []) {
         const template = document.createElement("template");
         template.innerHTML = note.content || "";
-        for (const image of template.content.querySelectorAll("img[data-attachment-id]")) image.src = await getDataUrl(image.dataset.attachmentId);
+        for (const image of template.content.querySelectorAll("img[data-attachment-id]")) {
+          const id = image.dataset.attachmentId || "";
+          image.src = await getDataUrl(id);
+          if (missingAttachments.has(id)) { image.dataset.missingAttachmentId = id; delete image.dataset.attachmentId; }
+        }
         note.content = template.innerHTML;
       }
-      for (const file of snapshot.files || []) if (file.attachmentId) file.dataUrl = await getDataUrl(file.attachmentId);
+      for (const file of snapshot.files || []) if (file.attachmentId) { file.dataUrl = await getDataUrl(file.attachmentId); if (missingAttachments.has(file.attachmentId)) { file.missingAttachmentId = file.attachmentId; delete file.attachmentId; } }
       for (const task of snapshot.tasks || []) {
         for (const value of Object.values(task.values || {})) {
           if (!Array.isArray(value)) continue;
-          for (const descriptor of value) if (descriptor?.attachmentId) descriptor.dataUrl = await getDataUrl(descriptor.attachmentId);
+           for (const descriptor of value) if (descriptor?.attachmentId) { descriptor.dataUrl = await getDataUrl(descriptor.attachmentId); if (missingAttachments.has(descriptor.attachmentId)) { descriptor.missingAttachmentId = descriptor.attachmentId; delete descriptor.attachmentId; } }
         }
       }
       for (const board of snapshot.whiteboards || []) {
-        for (const node of board.nodes || []) if (node.type === "image" && node.attachmentId) node.dataUrl = await getDataUrl(node.attachmentId);
+        for (const node of board.nodes || []) if (node.type === "image" && node.attachmentId) { node.dataUrl = await getDataUrl(node.attachmentId); if (missingAttachments.has(node.attachmentId)) { node.missingAttachmentId = node.attachmentId; delete node.attachmentId; } }
       }
       const [noteHistory, taskHistory, recovery] = await Promise.all([this.getAll(STORES.history), this.getAll(STORES.taskHistory), this.getAll(STORES.recovery)]);
-      return { ...snapshot, version: 8, format: "easynote-portable", exportedAt: isoNow(), safetyArchive: { noteHistory, taskHistory, recovery } };
+      return { ...snapshot, version: 8, format: "easynote-portable", exportedAt: isoNow(), missingAttachments: [...missingAttachments], safetyArchive: { noteHistory, taskHistory, recovery } };
     }
 
     async integrityCheck({ full = false } = {}) {
@@ -1072,11 +1384,12 @@
         const scheduleTemplateIds = new Set(scheduleEntries.filter((entry) => entry.isTemplate).map((entry) => entry.id));
         for (const entry of scheduleEntries) {
           const legacy = { id: entry.id, title: entry.title || "未命名日程", date: entry.date || "", allDay: entry.allDay !== false, startTime: entry.allDay === false ? entry.startTime || "" : "", endTime: entry.allDay === false ? entry.endTime || "" : "", notes: entry.notes || "", color: entry.color || "#4f7df3", completed: Boolean(entry.completed), taskId: entry.taskId || "", createdAt: entry.createdAt, updatedAt: entry.updatedAt };
+          const slotsClean = { ...legacy, timeSlots: scheduleTimeSlots(entry) };
           const linkedClean = { ...legacy, noteId: entry.noteId || "", url: entry.url || "", urlLabel: entry.urlLabel || "" };
           const reminderClean = { ...linkedClean, reminderMode: ["auto", "none", "custom"].includes(entry.reminderMode) ? entry.reminderMode : "auto", customReminderAt: entry.reminderMode === "custom" ? entry.customReminderAt || "" : "" };
-          const clean = { ...reminderClean, isTemplate: Boolean(entry.isTemplate), seriesId: entry.seriesId || "", recurrenceType: ["daily", "weekdays", "weekly", "monthly"].includes(entry.recurrenceType) ? entry.recurrenceType : "none", recurrenceInterval: Math.max(1, Number(entry.recurrenceInterval) || 1), repeatUntil: entry.repeatUntil || "", excludedDates: Array.isArray(entry.excludedDates) ? [...new Set(entry.excludedDates)].sort() : [] };
-          const currentHash = await sha256(stableStringify(clean)), reminderHash = await sha256(stableStringify(reminderClean)), linkedHash = await sha256(stableStringify(linkedClean)), legacyHash = await sha256(stableStringify(legacy));
-          if (currentHash !== entry.checksum && reminderHash !== entry.checksum && linkedHash !== entry.checksum && legacyHash !== entry.checksum) report.errors.push(`日程“${entry.title || entry.id}”校验值不一致`);
+          const clean = { ...reminderClean, timeSlots: scheduleTimeSlots(entry), isTemplate: Boolean(entry.isTemplate), seriesId: entry.seriesId || "", recurrenceType: ["daily", "weekdays", "weekly", "monthly"].includes(entry.recurrenceType) ? entry.recurrenceType : "none", recurrenceInterval: Math.max(1, Number(entry.recurrenceInterval) || 1), repeatUntil: entry.repeatUntil || "", excludedDates: Array.isArray(entry.excludedDates) ? [...new Set(entry.excludedDates)].sort() : [] };
+          const currentHash = await sha256(stableStringify(clean)), reminderHash = await sha256(stableStringify(reminderClean)), linkedHash = await sha256(stableStringify(linkedClean)), legacyHash = await sha256(stableStringify(legacy)), slotsHash = await sha256(stableStringify(slotsClean));
+          if (currentHash !== entry.checksum && slotsHash !== entry.checksum && reminderHash !== entry.checksum && linkedHash !== entry.checksum && legacyHash !== entry.checksum) report.errors.push(`日程“${entry.title || entry.id}”校验值不一致`);
           if (!/^\d{4}-\d{2}-\d{2}$/.test(clean.date) || Number.isNaN(new Date(`${clean.date}T12:00:00`).getTime())) report.errors.push(`日程“${entry.title || entry.id}”日期无效`);
           if (!clean.allDay && !/^\d{2}:\d{2}$/.test(clean.startTime)) report.errors.push(`日程“${entry.title || entry.id}”缺少有效开始时间`);
           if (!clean.allDay && clean.endTime && (!/^\d{2}:\d{2}$/.test(clean.endTime) || clean.endTime <= clean.startTime)) report.errors.push(`日程“${entry.title || entry.id}”结束时间无效`);
@@ -1089,8 +1402,9 @@
         const seriesIds = new Set(scheduleSeries.map((series) => series.id));
         for (const series of scheduleSeries) {
           const legacySeries = { id: series.id, title: series.title || "未命名固定日程", startDate: series.startDate || "", allDay: series.allDay !== false, startTime: series.allDay === false ? series.startTime || "" : "", endTime: series.allDay === false ? series.endTime || "" : "", notes: series.notes || "", color: series.color || "#4f7df3", taskId: series.taskId || "", reminderMode: series.reminderMode === "none" ? "none" : "auto", recurrenceType: ["daily", "weekdays", "weekly", "monthly"].includes(series.recurrenceType) ? series.recurrenceType : "daily", recurrenceInterval: Math.max(1, Number(series.recurrenceInterval) || 1), weekdays: Array.isArray(series.weekdays) ? [...new Set(series.weekdays.map(Number).filter((day) => day >= 0 && day <= 6))].sort() : [], dayOfMonth: Math.min(31, Math.max(1, Number(series.dayOfMonth) || 1)), until: series.until || "", active: series.active !== false, createdAt: series.createdAt, updatedAt: series.updatedAt };
-          const clean = { ...legacySeries, noteId: series.noteId || "", url: series.url || "", urlLabel: series.urlLabel || "" };
-          if (await sha256(stableStringify(clean)) !== series.checksum && await sha256(stableStringify(legacySeries)) !== series.checksum) report.errors.push(`固定日程“${clean.title}”校验值不一致`);
+          const legacySeriesSlots = { ...legacySeries, timeSlots: scheduleTimeSlots(series) };
+          const clean = { ...legacySeries, timeSlots: scheduleTimeSlots(series), noteId: series.noteId || "", url: series.url || "", urlLabel: series.urlLabel || "" };
+          if (await sha256(stableStringify(clean)) !== series.checksum && await sha256(stableStringify(legacySeriesSlots)) !== series.checksum && await sha256(stableStringify(legacySeries)) !== series.checksum) report.errors.push(`固定日程“${clean.title}”校验值不一致`);
           if (!/^\d{4}-\d{2}-\d{2}$/.test(clean.startDate)) report.errors.push(`固定日程“${clean.title}”开始日期无效`);
           if (clean.until && clean.until < clean.startDate) report.errors.push(`固定日程“${clean.title}”结束日期无效`);
           if (!clean.allDay && (!/^\d{2}:\d{2}$/.test(clean.startTime) || clean.endTime && clean.endTime <= clean.startTime)) report.errors.push(`固定日程“${clean.title}”时间范围无效`);
@@ -1162,12 +1476,13 @@
     }
 
     async safetySummary() {
-      const [storage, lastCommit, lastBackup, backupDirty] = await Promise.all([
-        this.storageInfo(), this.get(STORES.meta, "lastCommit"), this.get(STORES.meta, "lastBackup"), this.get(STORES.meta, "backupDirty")
+      const [storage, lastCommit, lastBackup, backupDirty, lastRescueSnapshot, lastLocalAutomaticBackup] = await Promise.all([
+        this.storageInfo(), this.get(STORES.meta, "lastCommit"), this.get(STORES.meta, "lastBackup"), this.get(STORES.meta, "backupDirty"),
+        this.get(STORES.meta, "lastRescueSnapshot"), this.get(STORES.meta, "lastLocalAutomaticBackup")
       ]);
       let backupPermission = "unconfigured";
       try { backupPermission = await this.getBackupPermission(false); } catch { backupPermission = "denied"; }
-      return { storage, lastCommit, lastBackup, backupDirty, backupPermission, integrity: this.integrityReport, pending: this.hasPendingWrites(), lastError: this.lastError?.message || null };
+      return { storage, lastCommit, lastBackup, backupDirty, lastRescueSnapshot, lastLocalAutomaticBackup, backupPermission, integrity: this.integrityReport, pending: this.hasPendingWrites(), status: this.lastStatus, lastError: this.lastError?.message || null, protectionError: this.lastProtectionError?.message || null };
     }
 
     startAutomaticBackup() {

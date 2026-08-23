@@ -3,12 +3,15 @@ import { EasyNoteDataSafety } from "./data-safety";
 import { TaskManager } from "./task-manager";
 import { WhiteboardManager } from "./whiteboard-manager";
 import { installEasyNoteRuntime, VueScheduleAdapter } from "../services/legacy-runtime";
+import { codeSourceFromBlock, editMermaidDiagram, hydrateMermaidDiagrams, mermaidSourceFromElement, prepareMermaidForStorage, renderMermaidBlock, renderMermaidSourceBlock, replaceCompletedMermaidFences } from "../services/mermaid";
 
 "use strict";
 
   const LEGACY_STORAGE_KEY = "easynote-data-v1";
   const THEME_KEY = "easynote-theme";
   const LAYOUT_KEY = "easynote-layout-v1";
+  const INSTALLATION_MARKER_KEY = "easynote-has-saved-user-data";
+  const APP_BUILD = "2026-08-21-storage-recovery-2";
   const DB_NAME = "easynote-db";
   const DB_STORE = "app-state";
   const MAX_IMAGE_BYTES = 12 * 1024 * 1024;
@@ -61,8 +64,8 @@ import { installEasyNoteRuntime, VueScheduleAdapter } from "../services/legacy-r
     databaseSafetyDetail: $("#databaseSafetyDetail"), persistentStorageState: $("#persistentStorageState"), storageQuotaDetail: $("#storageQuotaDetail"),
     directoryBackupState: $("#directoryBackupState"), directoryBackupDetail: $("#directoryBackupDetail"), lastVerifiedSave: $("#lastVerifiedSave"),
     pendingSaveDetail: $("#pendingSaveDetail"), requestPersistenceButton: $("#requestPersistenceButton"), runIntegrityButton: $("#runIntegrityButton"),
-    retrySaveButton: $("#retrySaveButton"), chooseBackupDirectoryButton: $("#chooseBackupDirectoryButton"), backupNowButton: $("#backupNowButton"),
-    verifyBackupButton: $("#verifyBackupButton"), historyList: $("#historyList"), recoveryList: $("#recoveryList"), portableExportButton: $("#portableExportButton"),
+    retrySaveButton: $("#retrySaveButton"), repairAttachmentsButton: $("#repairAttachmentsButton"), chooseBackupDirectoryButton: $("#chooseBackupDirectoryButton"), backupNowButton: $("#backupNowButton"),
+    verifyBackupButton: $("#verifyBackupButton"), historyList: $("#historyList"), recoveryList: $("#recoveryList"), portableExportButton: $("#portableExportButton"), emergencyExportButton: $("#emergencyExportButton"), safetyActionResult: $("#safetyActionResult"), safetyDiagnostic: $("#safetyDiagnostic"), safetyDiagnosticText: $("#safetyDiagnosticText"),
     safetyUpdatedAt: $("#safetyUpdatedAt"), migrationExportButton: $("#migrationExportButton"), migrationBanner: $("#migrationBanner"),
     migrationBannerExport: $("#migrationBannerExport"), migrationBannerDismiss: $("#migrationBannerDismiss")
   };
@@ -76,6 +79,7 @@ import { installEasyNoteRuntime, VueScheduleAdapter } from "../services/legacy-r
   let applyingExternalCommit = false;
   let activeView = "all";
   let activeNoteId = null;
+  let floatingEditorNoteId = null;
   let activeFileId = null;
   let activeLinkUrl = null;
   let activeLinkTabId = null;
@@ -128,6 +132,32 @@ import { installEasyNoteRuntime, VueScheduleAdapter } from "../services/legacy-r
     };
   }
 
+  function isPristineSeedData(data) {
+    if (!data || !Array.isArray(data.notes) || !Array.isArray(data.categories)) return false;
+    const emptyCollections = ["files", "tasks", "scheduleEntries", "scheduleSeries", "scheduleOccurrenceStates", "scheduleDailyNotes", "focusSessions", "reviews", "goals", "milestones"];
+    if (emptyCollections.some((key) => Array.isArray(data[key]) && data[key].length > 0)) return false;
+    const defaultTaskFieldIds = ["task-category", "task-description", "task-due", "task-note", "task-priority", "task-progress", "task-start", "task-status", "task-title"];
+    if ((data.taskFields || []).map((item) => item.id).sort().join("|") !== defaultTaskFieldIds.sort().join("|")) return false;
+    if (!Array.isArray(data.taskViews) || data.taskViews.length !== 1 || data.taskViews[0].id !== "main") return false;
+    if (!Array.isArray(data.whiteboards) || data.whiteboards.length !== 1 || data.whiteboards[0].title !== "我的白板" || data.whiteboards[0].nodes?.length || data.whiteboards[0].edges?.length) return false;
+    const expected = seedData();
+    const categorySignature = (item) => `${item.id}\u0000${item.name}`;
+    const noteSignature = (item) => JSON.stringify({
+      title: item.title,
+      categoryId: item.categoryId,
+      tags: Array.isArray(item.tags) ? item.tags : [],
+      favorite: Boolean(item.favorite),
+      deletedAt: item.deletedAt || null,
+      seedTimeDelta: new Date(item.updatedAt).getTime() - new Date(item.createdAt).getTime()
+    });
+    const actualCategories = data.categories.map(categorySignature).sort();
+    const expectedCategories = expected.categories.map(categorySignature).sort();
+    const actualNotes = data.notes.map(noteSignature).sort();
+    const expectedNotes = expected.notes.map(noteSignature).sort();
+    return JSON.stringify(actualCategories) === JSON.stringify(expectedCategories)
+      && JSON.stringify(actualNotes) === JSON.stringify(expectedNotes);
+  }
+
   function normalizeData(data) {
     if (!data || !Array.isArray(data.notes) || !Array.isArray(data.categories)) throw new Error("数据格式无效");
     data.version = 8;
@@ -168,13 +198,26 @@ import { installEasyNoteRuntime, VueScheduleAdapter } from "../services/legacy-r
       safety = new EasyNoteDataSafety({ onStatus: setSaveStatus });
       const stored = await safety.load();
       storageMode = "indexeddb-verified";
-      if (stored) return normalizeData(stored);
+      if (stored) {
+        if (!stored.notes.length || isPristineSeedData(stored)) {
+          try {
+            const recovered = await safety.restoreLocalAutomaticBackup({ minimumNoteCount: stored.notes.length, replacedState: stored });
+            if (recovered) { localStorage.setItem(INSTALLATION_MARKER_KEY, "true"); return normalizeData(recovered); }
+          } catch (error) { console.warn("本机自动备份恢复未完成，保留当前数据库内容", error); }
+        }
+        localStorage.setItem(INSTALLATION_MARKER_KEY, "true");
+        return normalizeData(stored);
+      }
+      const recovered = await safety.restoreLocalAutomaticBackup();
+      if (recovered) { localStorage.setItem(INSTALLATION_MARKER_KEY, "true"); return normalizeData(recovered); }
       let legacy = null;
       try {
         const raw = localStorage.getItem(LEGACY_STORAGE_KEY);
         if (raw) legacy = normalizeData(JSON.parse(raw));
       } catch (error) { console.warn("旧版 LocalStorage 数据读取失败", error); }
-      return legacy || seedData();
+      if (legacy) { localStorage.setItem(INSTALLATION_MARKER_KEY, "true"); return legacy; }
+      if (localStorage.getItem(INSTALLATION_MARKER_KEY) === "true") throw new Error("检测到此浏览器以前保存过 EasyNote 数据，但数据库当前为空且没有可验证的本机备份。为防止覆盖，已停止写入示例数据。请从数据安全备份恢复。");
+      return seedData();
     } catch (error) {
       storageMode = "failed";
       throw new Error(`安全数据库无法启动：${error.message || error}`);
@@ -194,6 +237,15 @@ import { installEasyNoteRuntime, VueScheduleAdapter } from "../services/legacy-r
   function persist(immediate = false, reason = "auto") {
     if (!safety) return Promise.resolve(false);
     return safety.queueSave(state, immediate, reason);
+  }
+
+  function replaceStateContents(nextState) {
+    if (!state || !nextState) return;
+    for (const key of Object.keys(state)) delete state[key];
+    Object.assign(state, nextState);
+    taskManager?.setState(state);
+    scheduleManager?.render();
+    whiteboardManager?.setState(state);
   }
 
   function mergeCommitDetails(current, next) {
@@ -523,6 +575,7 @@ import { installEasyNoteRuntime, VueScheduleAdapter } from "../services/legacy-r
   function renderEditor() {
     const note = getActiveNote(), file = getActiveFile();
     deselectImage();
+    els.editorPanel.classList.remove("floating-note-locked");
     if (activeLinkUrl) {
       els.emptyState.hidden = true; els.editor.hidden = true; els.fileViewer.hidden = true; els.linkViewer.hidden = false;
       if (fileObjectUrl) { URL.revokeObjectURL(fileObjectUrl); fileObjectUrl = null; }
@@ -538,11 +591,14 @@ import { installEasyNoteRuntime, VueScheduleAdapter } from "../services/legacy-r
     if (!note) { els.emptyState.hidden = false; els.editor.hidden = true; renderSecondaryEditor(); updateOutline(); applyEditorLayout(false); return; }
     els.emptyState.hidden = true;
     els.editor.hidden = false;
+    const floatingLocked = Boolean(note && floatingEditorNoteId === note.id);
+    els.editorPanel.classList.toggle("floating-note-locked", floatingLocked);
     els.titleInput.value = note.title || "";
     els.categorySelect.value = note.categoryId || "";
     els.tagInput.value = (note.tags || []).join(", ");
     els.contentEditor.innerHTML = note.content || "";
     normalizeRichImageStructure(els.contentEditor);
+    void hydrateMermaidDiagrams(els.contentEditor);
     els.contentEditor.querySelectorAll("a[href]").forEach((link) => { link.removeAttribute("target"); link.rel = "noopener noreferrer"; });
     els.markdownEditor.value = htmlToMarkdown(note.content || "");
     els.editedTime.textContent = formatDate(note.updatedAt, true);
@@ -550,15 +606,15 @@ import { installEasyNoteRuntime, VueScheduleAdapter } from "../services/legacy-r
     els.favoriteButton.title = note.favorite ? "取消收藏" : "收藏";
     const inTrash = Boolean(note.deletedAt);
     els.trashActions.hidden = !inTrash;
-    els.titleInput.disabled = inTrash;
-    els.categorySelect.disabled = inTrash;
-    els.tagInput.disabled = inTrash;
-    els.contentEditor.contentEditable = inTrash ? "false" : "true";
-    els.markdownEditor.disabled = inTrash;
-    els.formatToolbar.style.display = inTrash || editMode === "markdown" ? "none" : "flex";
-    els.modeToggle.style.display = inTrash ? "none" : "inline-block";
-    els.favoriteButton.style.display = inTrash ? "none" : "inline-grid";
-    els.deleteButton.style.display = inTrash ? "none" : "inline-grid";
+    els.titleInput.disabled = inTrash || floatingLocked;
+    els.categorySelect.disabled = inTrash || floatingLocked;
+    els.tagInput.disabled = inTrash || floatingLocked;
+    els.contentEditor.contentEditable = inTrash || floatingLocked ? "false" : "true";
+    els.markdownEditor.disabled = inTrash || floatingLocked;
+    els.formatToolbar.style.display = inTrash || floatingLocked || editMode === "markdown" ? "none" : "flex";
+    els.modeToggle.style.display = inTrash || floatingLocked ? "none" : "inline-block";
+    els.favoriteButton.style.display = inTrash || floatingLocked ? "none" : "inline-grid";
+    els.deleteButton.style.display = inTrash || floatingLocked ? "none" : "inline-grid";
     renderSecondaryEditor();
     updateOutline();
     applyEditorLayout(false);
@@ -682,6 +738,7 @@ import { installEasyNoteRuntime, VueScheduleAdapter } from "../services/legacy-r
   function getCleanPrimaryHtml() {
     const clone = els.contentEditor.cloneNode(true);
     normalizeRichImageStructure(clone);
+    prepareMermaidForStorage(clone);
     clone.querySelectorAll(".image-selected,.context-target").forEach((element) => element.classList.remove("image-selected", "context-target"));
     return clone.innerHTML;
   }
@@ -690,6 +747,7 @@ import { installEasyNoteRuntime, VueScheduleAdapter } from "../services/legacy-r
     clearTimeout(saveTimer);
     const note = getActiveNote();
     if (!note || note.deletedAt || els.editor.hidden) return;
+    if (floatingEditorNoteId === note.id) return persist(true, reason);
     note.title = els.titleInput.value.trim(); note.categoryId = els.categorySelect.value;
     note.tags = els.tagInput.value.split(/[,，]/).map((tag) => tag.trim()).filter(Boolean);
     note.content = editMode === "markdown" ? markdownToHtml(els.markdownEditor.value) : getCleanPrimaryHtml();
@@ -700,7 +758,7 @@ import { installEasyNoteRuntime, VueScheduleAdapter } from "../services/legacy-r
     const markdown = editMode === "markdown";
     if (convert) {
       if (markdown) els.markdownEditor.value = htmlToMarkdown(els.contentEditor.innerHTML);
-      else { els.contentEditor.innerHTML = markdownToHtml(els.markdownEditor.value); normalizeRichImageStructure(els.contentEditor); }
+      else { els.contentEditor.innerHTML = markdownToHtml(els.markdownEditor.value); normalizeRichImageStructure(els.contentEditor); void hydrateMermaidDiagrams(els.contentEditor); }
     }
     els.contentEditor.hidden = markdown; els.markdownEditor.hidden = !markdown;
     els.formatToolbar.style.display = markdown ? "none" : "flex";
@@ -983,7 +1041,12 @@ import { installEasyNoteRuntime, VueScheduleAdapter } from "../services/legacy-r
   function markdownToHtml(markdown) {
     const codeBlocks = [], imageBlocks = [];
     let prepared = String(markdown || "").replace(/\r\n/g, "\n")
-      .replace(/```([\s\S]*?)```/g, (_, code) => { codeBlocks.push(`<pre>${escapeHtml(code.trim())}</pre>`); return `\n@@CODE${codeBlocks.length - 1}@@\n`; })
+      .replace(/```([a-zA-Z0-9_-]*)\n?([\s\S]*?)```/g, (_, language, code) => {
+        const mermaid = renderMermaidBlock(code, language || "");
+        const fallback = language ? `${language}\n${code}` : code;
+        codeBlocks.push(mermaid || `<pre>${escapeHtml(fallback.trim())}</pre>`);
+        return `\n@@CODE${codeBlocks.length - 1}@@\n`;
+      })
       .replace(/<!--\s*easynote:image-clear\s*-->/gi, "\n@@IMAGECLEAR@@\n")
       .replace(/!\[([^\]]*)\]\(([^)\s]+)\)(?:\{([^}\n]*)\})?/g, (match, alt, target, meta) => {
         const html = markdownImageToHtml(alt, target, meta);
@@ -1001,7 +1064,7 @@ import { installEasyNoteRuntime, VueScheduleAdapter } from "../services/legacy-r
     lines.forEach((line) => {
       const ul = line.match(/^[-*] (.+)$/), ol = line.match(/^\d+\. (.+)$/);
       if (ul || ol) { const type = ul ? "ul" : "ol"; if (listType !== type) { closeList(); result.push(`<${type}>`); listType = type; } result.push(`<li>${(ul || ol)[1]}</li>`); }
-      else { closeList(); if (!line.trim()) result.push(""); else if (/^<(h[1-3]|blockquote|pre|img)/.test(line) || /^@@(?:CODE|IMAGE)/.test(line)) result.push(line); else result.push(`<p>${line}</p>`); }
+      else { closeList(); if (!line.trim()) result.push(""); else if (/^<(h[1-3]|blockquote|pre|img|div)/.test(line) || /^@@(?:CODE|IMAGE)/.test(line)) result.push(line); else result.push(`<p>${line}</p>`); }
     });
     closeList();
     const container = document.createElement("div");
@@ -1023,10 +1086,12 @@ import { installEasyNoteRuntime, VueScheduleAdapter } from "../services/legacy-r
       const clearPrefix = node.dataset.imageClear === "true" ? "<!-- easynote:image-clear -->\n" : "";
       switch (node.tagName.toLowerCase()) {
         case "h1": return `${clearPrefix}# ${inner}\n\n`; case "h2": return `${clearPrefix}## ${inner}\n\n`; case "h3": return `${clearPrefix}### ${inner}\n\n`;
-        case "p": case "div": return `${clearPrefix}${inner}\n\n`; case "br": return "\n";
+        case "p": return `${clearPrefix}${inner}\n\n`;
+        case "div": return node.classList.contains("mermaid-diagram") ? `${clearPrefix}\`\`\`mermaid\n${mermaidSourceFromElement(node)}\n\`\`\`\n\n` : `${clearPrefix}${inner}\n\n`;
         case "strong": case "b": return `**${inner}**`; case "em": case "i": return `*${inner}*`;
         case "blockquote": return clearPrefix + inner.split("\n").filter(Boolean).map((line) => `> ${line}`).join("\n") + "\n\n";
-        case "pre": return `${clearPrefix}\`\`\`\n${node.textContent}\n\`\`\`\n\n`; case "code": return `\`${inner}\``;
+        case "pre": return `${clearPrefix}\`\`\`${node.dataset.codeLanguage === "mermaid" ? "mermaid" : ""}\n${codeSourceFromBlock(node)}\n\`\`\`\n\n`;
+        case "code": return `\`${inner}\``;
         case "a": return `[${inner}](${node.getAttribute("href") || ""})`;
         case "img": {
           const src = node.getAttribute("src") || "";
@@ -1197,7 +1262,55 @@ import { installEasyNoteRuntime, VueScheduleAdapter } from "../services/legacy-r
     persist(true, "danger"); render(); showToast("回收站已清空，可在数据安全中心恢复 30 天");
   }
 
-  function downloadFile(name, content, type) { const blob = new Blob([content], { type }); const url = URL.createObjectURL(blob); const anchor = document.createElement("a"); anchor.href = url; anchor.download = name; anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); }
+  function downloadFile(name, content, type) {
+    const blob = new Blob([content], { type });
+    const anchor = document.createElement("a");
+    anchor.download = name;
+    if (typeof URL.createObjectURL === "function") {
+      const url = URL.createObjectURL(blob); anchor.href = url; anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); return;
+    }
+    anchor.href = `data:${type},${encodeURIComponent(content)}`; anchor.click();
+  }
+  async function emergencyPortableSnapshot(error = "") {
+    let data;
+    try { data = structuredClone(state); } catch { data = JSON.parse(JSON.stringify(state)); }
+    const dataUrlCache = new Map();
+    const inlineAttachment = async (id) => {
+      if (!id) return "";
+      if (!dataUrlCache.has(id)) {
+        const blob = safety?.getAttachmentBlob(id);
+        dataUrlCache.set(id, blob ? await fileToDataUrl(blob) : "");
+      }
+      return dataUrlCache.get(id);
+    };
+    for (const note of data.notes || []) {
+      const template = document.createElement("template"); template.innerHTML = note.content || "";
+      for (const image of template.content.querySelectorAll("img[data-attachment-id]")) {
+        const id = image.dataset.attachmentId || "", dataUrl = await inlineAttachment(id);
+        if (dataUrl) image.src = dataUrl;
+        else { image.removeAttribute("src"); image.dataset.missingAttachmentId = id; }
+      }
+      note.content = template.innerHTML;
+    }
+    for (const file of data.files || []) if (file.attachmentId) { file.dataUrl = await inlineAttachment(file.attachmentId); if (!file.dataUrl) file.missingAttachmentId = file.attachmentId; }
+    for (const task of data.tasks || []) for (const value of Object.values(task.values || {})) if (Array.isArray(value)) for (const item of value) if (item?.attachmentId) { item.dataUrl = await inlineAttachment(item.attachmentId); if (!item.dataUrl) item.missingAttachmentId = item.attachmentId; }
+    for (const board of data.whiteboards || []) for (const node of board.nodes || []) if (node.type === "image" && node.attachmentId) { node.dataUrl = await inlineAttachment(node.attachmentId); if (!node.dataUrl) node.missingAttachmentId = node.attachmentId; }
+    return { format: "easynote-emergency", version: 8, exportedAt: new Date().toISOString(), exportError: error || null, data };
+  }
+  async function exportEmergencySnapshot() {
+    try {
+      flushEditor();
+      const error = safety?.lastError?.message || safety?.lastProtectionError?.message || "未读取数据库，仅导出当前页面内存数据";
+      const snapshot = await emergencyPortableSnapshot(error);
+      const content = JSON.stringify(snapshot, null, 2);
+      const date = new Date().toISOString().replace(/[:.]/g, "-");
+      const result = await shareOrDownloadFile(`easynote-emergency-${date}.json`, content, "application/json;charset=utf-8");
+      if (result !== "cancelled") showToast("紧急快照已导出：包含当前页面中的全部笔记数据");
+    } catch (error) {
+      console.error("EasyNote emergency export failed", error);
+      showToast(`紧急导出失败：${error?.message || error}`);
+    }
+  }
   async function shareOrDownloadFile(name, content, type) {
     const file = new File([content], name, { type });
     if (matchMedia("(max-width: 620px)").matches && navigator.share && navigator.canShare?.({ files: [file] })) {
@@ -1208,11 +1321,25 @@ import { installEasyNoteRuntime, VueScheduleAdapter } from "../services/legacy-r
   }
   async function exportData() {
     try {
-      await flushActiveWorkspace("manual");
+      let saveWarning = "";
+      try {
+        const saved = await flushActiveWorkspace("manual");
+        if (saved === false) saveWarning = safety.lastError?.message || "当前页面还有未保存修改";
+      } catch (error) { saveWarning = String(error?.message || error); console.warn("导出前保存失败，继续导出当前页面", error); }
       const date = new Date().toISOString().slice(0, 10);
-      const portable = await safety.exportPortable(state);
+      let portable;
+      try { portable = await safety.exportPortable(state, { allowMissingAttachments: true }); }
+      catch (error) {
+        console.error("完整附件备份失败，改用当前页面紧急快照", error);
+        portable = await emergencyPortableSnapshot(String(error?.message || error));
+        saveWarning = [saveWarning, "附件校验失败，已改用紧急快照"].filter(Boolean).join("；");
+      }
       const result = await shareOrDownloadFile(`easynote-backup-${date}.json`, JSON.stringify(portable, null, 2), "application/json;charset=utf-8");
-      if (result !== "cancelled") showToast(result === "shared" ? "便携式完整备份已发送" : "便携式完整备份已导出并包含全部附件");
+      if (result !== "cancelled") {
+        const missing = portable.missingAttachments?.length ? `，${portable.missingAttachments.length} 个缺失附件已用占位图保留` : "";
+        const emergency = portable.format === "easynote-emergency" ? "（紧急快照：保留当前页面全部笔记数据）" : "";
+        showToast(saveWarning ? `备份已导出${emergency}${missing}（注意：${saveWarning}）` : `便携式完整备份已导出${emergency}${missing}`);
+      }
     } catch (error) { console.error(error); showToast(`备份导出失败：${error.message || error}`); }
   }
   function exportNoteMarkdown(id = activeNoteId) {
@@ -1235,17 +1362,33 @@ import { installEasyNoteRuntime, VueScheduleAdapter } from "../services/legacy-r
           const note = { id: uid(), title: metadata.title || heading?.[1] || file.name.replace(/\.(md|markdown)$/i, ""), categoryId, tags: (metadata.tags || "").split(/[,，]/).map((tag) => tag.trim()).filter(Boolean), favorite: false, createdAt: now(), updatedAt: now(), deletedAt: null, content: markdownToHtml(body) };
           state.notes.unshift(note); activeView = "all"; activeNoteId = note.id; persist(true); render(); showToast("Markdown 笔记已导入"); return;
         }
-        const imported = normalizeData(JSON.parse(reader.result));
+        const parsed = JSON.parse(reader.result);
+        const imported = normalizeData(parsed?.format === "easynote-emergency" ? parsed.data : parsed);
         const confirmed = await showConfirmDialog({ title: "导入备份", message: `将导入 ${imported.notes.length} 篇笔记、${imported.tasks.length} 条任务、${imported.scheduleEntries.length} 条普通日程、${imported.scheduleSeries.length} 个固定日程和 ${imported.whiteboards.length} 张白板并替换当前数据，是否继续？`, confirmText: "导入并替换", danger: true });
         if (!confirmed) return;
+        flushActiveWorkspace("import");
+        await safety.flush();
         await safety.recordRecovery("import", "导入前完整数据", structuredClone(state));
-        state = imported; taskManager?.setState(state); scheduleManager?.setState(state); whiteboardManager?.setState(state); activeView = "all"; activeNoteId = state.notes.find((note) => !note.deletedAt)?.id || null;
-        const saved = await persist(true, "import");
+        const saved = await safety.queueSave(imported, true, "import");
         if (!saved) throw new Error("导入内容未能通过保存校验，旧数据已保存在紧急恢复区");
+        const committed = await safety.load(false);
+        if (!committed) throw new Error("导入写入成功，但重新读取数据库失败");
+        await safety.verifyAttachmentReferences(committed, true);
+        safety.captureStateBaselines(committed);
+        replaceStateContents(committed); activeView = "all"; activeNoteId = state.notes.find((note) => !note.deletedAt)?.id || null;
         render(); showToast("数据导入成功并已通过回读校验");
-      } catch (error) { console.error(error); showToast("无法导入：文件格式不正确"); }
+      } catch (error) {
+        console.error(error);
+        const message = error instanceof SyntaxError ? "文件不是有效的 JSON" : String(error?.message || "未知错误");
+        showToast(`无法导入：${message}`);
+      }
     };
     reader.readAsText(file);
+  }
+
+  function triggerMarkdownImport() {
+    els.importFile.accept = ".md,.markdown,text/markdown";
+    els.importFile.click();
   }
 
   function saveCurrentRange(range) { if (range && els.contentEditor.contains(range.commonAncestorContainer)) savedEditorRange = range.cloneRange(); }
@@ -1363,15 +1506,18 @@ import { installEasyNoteRuntime, VueScheduleAdapter } from "../services/legacy-r
 
   async function updateSafetyCenter() {
     if (!safety) return;
+    try {
     const summary = await safety.safetySummary();
+    const diagnostic = [summary.lastError && `保存错误：${summary.lastError}`, summary.protectionError && `保护/备份错误：${summary.protectionError}`, `前端版本：${APP_BUILD}`].filter(Boolean).join("\n");
+    if (els.safetyDiagnostic && els.safetyDiagnosticText) { els.safetyDiagnostic.hidden = !diagnostic; els.safetyDiagnosticText.textContent = diagnostic; }
     const report = summary.integrity;
     els.databaseSafetyState.textContent = report ? (report.ok ? "完整性正常" : `发现 ${report.errors.length} 个问题`) : "等待检查";
     els.databaseSafetyDetail.textContent = report ? `${report.counts.notes || 0} 篇笔记 · ${report.counts.tasks || 0} 条任务 · ${report.counts.schedules || 0} 条日程 · ${report.counts.whiteboards || 0} 张白板${report.warnings.length ? ` · ${report.warnings.length} 个提醒` : ""}` : "数据库已按记录独立存储";
     safetyCardLevel(els.databaseSafetyState, report?.ok ? (report.warnings.length ? "warn" : "good") : report ? "bad" : "warn");
 
     const quota = summary.storage.quota || 0, usage = summary.storage.usage || 0, ratio = quota ? usage / quota : 0;
-    els.persistentStorageState.textContent = summary.storage.persisted ? "已持久化" : "尚未持久化";
-    els.storageQuotaDetail.textContent = quota ? `${formatBytes(usage)} / ${formatBytes(quota)}（${Math.round(ratio * 100)}%）` : "浏览器未提供容量估算";
+    els.persistentStorageState.textContent = summary.storage.persisted ? "已持久化" : "未授予（仍可使用）";
+    els.storageQuotaDetail.textContent = quota ? `${formatBytes(usage)} / ${formatBytes(quota)}（${Math.round(ratio * 100)}%）· 未持久化不影响当前使用` : "浏览器未提供容量估算";
     safetyCardLevel(els.persistentStorageState, ratio >= .95 ? "bad" : summary.storage.persisted ? (ratio >= .7 ? "warn" : "good") : "warn");
 
     const backupLabels = { granted: "自动备份可用", prompt: "需要重新授权", denied: "目录权限已拒绝", unconfigured: "未配置目录" };
@@ -1380,9 +1526,11 @@ import { installEasyNoteRuntime, VueScheduleAdapter } from "../services/legacy-r
     safetyCardLevel(els.directoryBackupState, summary.backupPermission === "granted" && summary.lastBackup ? "good" : summary.backupPermission === "denied" ? "bad" : "warn");
 
     els.lastVerifiedSave.textContent = formatSafetyTime(summary.lastCommit?.committedAt);
-    els.pendingSaveDetail.textContent = summary.lastError ? `失败：${summary.lastError}` : summary.pending ? "仍有写入正在等待" : "没有待处理写入";
-    safetyCardLevel(els.lastVerifiedSave, summary.lastError ? "bad" : summary.pending ? "warn" : "good");
-    els.retrySaveButton.disabled = !summary.pending && !summary.lastError;
+    const staleFailure = summary.status === "failed" && !summary.lastError;
+    els.pendingSaveDetail.textContent = summary.lastError ? `失败：${summary.lastError}` : summary.pending ? "仍有写入正在等待" : staleFailure ? "上次保存状态异常，可重新保存当前页面" : "没有待处理写入";
+    safetyCardLevel(els.lastVerifiedSave, summary.lastError || staleFailure ? "bad" : summary.pending ? "warn" : "good");
+    els.retrySaveButton.disabled = !summary.pending && !summary.lastError && !staleFailure;
+    if (els.repairAttachmentsButton) els.repairAttachmentsButton.disabled = !safety.localAutomaticBackupAvailable?.();
     els.requestPersistenceButton.disabled = summary.storage.persisted;
 
     const backupText = summary.backupPermission === "granted" ? (summary.backupDirty?.value ? "数据库安全，目录备份待更新" : "数据库与目录备份正常") : "数据库已验证，建议配置自动备份";
@@ -1398,6 +1546,13 @@ import { installEasyNoteRuntime, VueScheduleAdapter } from "../services/legacy-r
 
     const recoveryItems = await safety.getRecoveryItems();
     els.recoveryList.innerHTML = recoveryItems.length ? recoveryItems.map((item) => `<div class="history-item"><div><strong>${escapeHtml(item.label)}</strong><span>${formatSafetyTime(item.createdAt)} · 保留至 ${formatSafetyTime(item.expiresAt)}</span></div><button data-safety-action="restore-recovery" data-id="${item.id}">恢复</button></div>`).join("") : '<p class="safety-empty">暂无可恢复内容。</p>';
+  } catch (error) {
+      const message = String(error?.message || error);
+      if (els.safetyDiagnostic && els.safetyDiagnosticText) { els.safetyDiagnostic.hidden = false; els.safetyDiagnosticText.textContent = `数据安全中心读取失败：${message}\n前端版本：${APP_BUILD}`; }
+      els.databaseSafetyState.textContent = "无法读取数据库";
+      els.databaseSafetyDetail.textContent = message;
+      safetyCardLevel(els.databaseSafetyState, "bad");
+    }
   }
 
   async function openSafetyCenter() {
@@ -1413,13 +1568,34 @@ import { installEasyNoteRuntime, VueScheduleAdapter } from "../services/legacy-r
     try {
       const result = await work();
       if (successMessage) showToast(typeof successMessage === "function" ? successMessage(result) : successMessage);
-      await updateSafetyCenter();
       return result;
     } catch (error) {
       console.error(error); showToast(error.message || "操作失败");
-      await updateSafetyCenter();
       return null;
-    } finally { button.disabled = false; button.textContent = oldText; }
+    } finally {
+      button.disabled = false; button.textContent = oldText;
+      await updateSafetyCenter();
+    }
+  }
+
+  async function retryCurrentStateSave() {
+    const workspaceResult = await flushActiveWorkspace("manual");
+    const saved = workspaceResult === undefined ? await persist(true, "manual") : workspaceResult;
+    const flushed = await safety.flush();
+    if (!saved || !flushed) throw new Error(safety.lastError?.message || "当前数据仍未能写入数据库");
+    const report = await safety.integrityCheck({ full: false });
+    if (!report.ok) throw new Error(report.errors[0] || "保存完成，但数据库完整性检查未通过");
+    setSaveStatus("saved", { verifiedAt: report.checkedAt });
+    return true;
+  }
+
+  async function repairCurrentAttachments() {
+    const result = await safety.repairMissingAttachments(state);
+    if (!result?.repaired) throw new Error("没有找到可匹配的缺失附件；请先导出紧急快照保留当前数据");
+    replaceStateContents(normalizeData(result.state));
+    activeNoteId = getActiveNote()?.id || activeNoteId;
+    render();
+    return `已修复 ${result.repaired} 个附件并重新验证`;
   }
 
   async function restoreHistoryVersion(id) {
@@ -1440,7 +1616,7 @@ import { installEasyNoteRuntime, VueScheduleAdapter } from "../services/legacy-r
     const payload = result.payload;
     if (Array.isArray(payload?.categories) && Array.isArray(payload?.notes)) {
       await safety.recordRecovery("restore-replace", "恢复整库前的数据", structuredClone(state));
-      state = normalizeData(payload); taskManager?.setState(state); scheduleManager?.setState(state); whiteboardManager?.setState(state);
+      replaceStateContents(normalizeData(payload));
     } else if (Array.isArray(payload?.notes)) {
       payload.notes.forEach((note) => { const restored = { ...note, deletedAt: null, updatedAt: now() }; const index = state.notes.findIndex((item) => item.id === restored.id); if (index >= 0) state.notes[index] = restored; else state.notes.unshift(restored); });
     } else if (payload?.file) {
@@ -1470,7 +1646,13 @@ import { installEasyNoteRuntime, VueScheduleAdapter } from "../services/legacy-r
     await persist(true, "manual"); taskManager?.render(); scheduleManager?.render(); whiteboardManager?.setState(state); render(); await updateSafetyCenter(); showToast("数据已恢复并通过保存校验");
   }
 
-  function showToast(message) { clearTimeout(toastTimer); els.toast.textContent = message; els.toast.classList.add("show"); toastTimer = setTimeout(() => els.toast.classList.remove("show"), 2400); }
+  function showToast(message) {
+    clearTimeout(toastTimer); els.toast.textContent = message; els.toast.classList.add("show");
+    if (els.safetyBackdrop && !els.safetyBackdrop.hidden && els.safetyActionResult) {
+      els.safetyActionResult.hidden = false; els.safetyActionResult.textContent = message;
+    }
+    toastTimer = setTimeout(() => els.toast.classList.remove("show"), 3000);
+  }
   function closeSidebar() { els.sidebar.classList.remove("open"); els.sidebarScrim.classList.remove("open"); }
 
   function applyLayout(shouldSave = true) {
@@ -1545,11 +1727,13 @@ import { installEasyNoteRuntime, VueScheduleAdapter } from "../services/legacy-r
   function linkMenu(link) { const url = link.href; return [menu("在正文中打开", "open-link-editor", { value: url }), menu("在新标签页打开", "open-link-tab", { value: url }), sep(), menu("复制链接地址", "copy-link", { value: url })]; }
   function noteMenu(note) {
     if (note.deletedAt) return [menu("打开查看", "open-note", { value: note.id }), sep(), menu("恢复笔记", "restore-note", { value: note.id }), menu("永久删除", "permanent-delete", { value: note.id, danger: true })];
-    return [menu("打开笔记", "open-note", { value: note.id }), menu("在右侧分栏打开", "open-secondary", { value: note.id, disabled: note.id === activeNoteId }), menu(note.favorite ? "取消收藏" : "收藏笔记", "toggle-favorite", { value: note.id }), menu("复制笔记", "duplicate-note", { value: note.id }), menu("移动到文件夹", null, { submenu: categoryMoveItems(note.id) }), sep(), menu("导出 Markdown", "export-note", { value: note.id }), menu("移入回收站", "trash-note", { value: note.id, danger: true })];
+    return [menu("打开笔记", "open-note", { value: note.id }), menu("在右侧分栏打开", "open-secondary", { value: note.id, disabled: note.id === activeNoteId }), menu(note.favorite ? "取消收藏" : "收藏笔记", "toggle-favorite", { value: note.id }), menu("复制笔记", "duplicate-note", { value: note.id }), menu("移动到文件夹", null, { submenu: categoryMoveItems(note.id) }), sep(), menu("导出 Markdown", "export-note", { value: note.id }), menu("导入 Markdown 笔记", "import-markdown"), menu("移入回收站", "trash-note", { value: note.id, danger: true })];
   }
   function imageMenu() { return [menu("图片尺寸", null, { submenu: [menu("小尺寸", "image-size", { value: "small" }), menu("中等尺寸", "image-size", { value: "medium" }), menu("大尺寸", "image-size", { value: "large" }), menu("占满正文", "image-size", { value: "full" })] }), menu("图片对齐", null, { submenu: [menu("左对齐", "image-align", { value: "left" }), menu("居中", "image-align", { value: "center" }), menu("右对齐", "image-align", { value: "right" })] }), menu("修改图片说明", "image-alt"), menu("下载图片", "image-download"), sep(), menu("删除图片", "image-delete", { danger: true })]; }
+  function mermaidSourceMenu() { return [menu("渲染 Mermaid 图表", "render-mermaid"), sep(), menu("删除 Mermaid 源码块", "delete-mermaid", { danger: true })]; }
+  function mermaidDiagramMenu() { return [menu("编辑 Mermaid 源码", "edit-mermaid"), sep(), menu("删除 Mermaid 图表", "delete-mermaid", { danger: true })]; }
   function selectionMenu() { return [menu("剪切", "cut", { shortcut: "Ctrl X" }), menu("复制", "copy", { shortcut: "Ctrl C" }), sep(), menu("加粗", "editor-command", { value: "bold", shortcut: "Ctrl B" }), menu("斜体", "editor-command", { value: "italic", shortcut: "Ctrl I" }), menu("设置标题", null, { submenu: [menu("正文", "format-block", { value: "p" }), menu("二级标题", "format-block", { value: "h2" }), menu("三级标题", "format-block", { value: "h3" })] }), menu("引用", "format-block", { value: "blockquote" }), menu("代码块", "format-block", { value: "pre" }), menu("添加链接", "insert-link"), menu("清除格式", "editor-command", { value: "removeFormat" })]; }
-  function caretMenu() { return [menu("粘贴", "paste", { shortcut: "Ctrl V" }), sep(), menu("插入图片", "choose-image"), menu("插入链接", "insert-link"), menu("待办事项", "insert-html", { value: '<div class="check-item"><input type="checkbox" contenteditable="false"><span>待办事项</span></div><p><br></p>' }), menu("无序列表", "editor-command", { value: "insertUnorderedList" }), menu("有序列表", "editor-command", { value: "insertOrderedList" }), menu("引用", "format-block", { value: "blockquote" }), menu("代码块", "format-block", { value: "pre" }), menu("分割线", "insert-html", { value: "<hr><p><br></p>" })]; }
+  function caretMenu() { return [menu("粘贴", "paste", { shortcut: "Ctrl V" }), sep(), menu("插入图片", "choose-image"), menu("插入链接", "insert-link"), menu("插入 Mermaid 流程图", "insert-mermaid"), menu("待办事项", "insert-html", { value: '<div class="check-item"><input type="checkbox" contenteditable="false"><span>待办事项</span></div><p><br></p>' }), menu("无序列表", "editor-command", { value: "insertUnorderedList" }), menu("有序列表", "editor-command", { value: "insertOrderedList" }), menu("引用", "format-block", { value: "blockquote" }), menu("代码块", "format-block", { value: "pre" }), menu("分割线", "insert-html", { value: "<hr><p><br></p>" })]; }
 
   function buildContextMenu(items) {
     return items.map((item) => {
@@ -1603,6 +1787,7 @@ import { installEasyNoteRuntime, VueScheduleAdapter } from "../services/legacy-r
     else if (action === "empty-trash") emptyTrash();
     else if (action === "sort") { els.sortSelect.value = value; renderList(); }
     else if (action === "import") els.importFile.click();
+    else if (action === "import-markdown") triggerMarkdownImport();
     else if (action === "export") exportData();
     else if (action === "refresh") { render(); showToast("列表已刷新"); }
     else if (action === "cut" || action === "copy") { if (contextPayload?.input) contextPayload.input.focus(); else restoreEditorRange(); document.execCommand(action); if (action === "cut" && !contextPayload?.input) commitEditor(); }
@@ -1611,6 +1796,20 @@ import { installEasyNoteRuntime, VueScheduleAdapter } from "../services/legacy-r
     else if (action === "editor-command") runEditorCommand(value);
     else if (action === "format-block") runEditorCommand("formatBlock", value);
     else if (action === "insert-link") insertLinkAtSelection();
+    else if (action === "insert-mermaid") insertEditorHtml(`<pre data-code-language="mermaid">${escapeHtml("flowchart TD\nA[开始] --> B[结束]")}</pre><p><br></p>`);
+    else if (action === "render-mermaid" && contextPayload?.block) {
+      if (!renderMermaidSourceBlock(contextPayload.block)) return;
+      void hydrateMermaidDiagrams(els.contentEditor); commitEditor();
+    }
+    else if (action === "edit-mermaid" && contextPayload?.diagram) {
+      const block = editMermaidDiagram(contextPayload.diagram); if (!block) return;
+      const range = document.createRange(), selection = window.getSelection();
+      range.selectNodeContents(block); range.collapse(false); selection?.removeAllRanges(); selection?.addRange(range); savedEditorRange = range.cloneRange(); commitEditor();
+    }
+    else if (action === "delete-mermaid") {
+      const target = contextPayload?.diagram || contextPayload?.block; if (!target) return;
+      target.remove(); commitEditor();
+    }
     else if (action === "insert-html") insertEditorHtml(value);
     else if (action === "choose-image") els.imageFile.click();
     else if (action?.startsWith("image-")) changeImage(action, value);
@@ -1627,6 +1826,10 @@ import { installEasyNoteRuntime, VueScheduleAdapter } from "../services/legacy-r
     if (link) return { items: linkMenu(link), payload: { link } };
     const image = target.closest("#contentEditor img");
     if (image) return { items: imageMenu(), payload: { image } };
+    const diagram = target.closest("#contentEditor .mermaid-diagram");
+    if (diagram) return { items: mermaidDiagramMenu(), payload: { diagram } };
+    const mermaidBlock = target.closest("#contentEditor pre[data-code-language='mermaid']");
+    if (mermaidBlock) return { items: mermaidSourceMenu(), payload: { block: mermaidBlock } };
     if (target.closest("#contentEditor")) {
       const note = getActiveNote();
       if (note?.deletedAt) return { items: noteMenu(note), payload: { noteId: note.id } };
@@ -1641,11 +1844,11 @@ import { installEasyNoteRuntime, VueScheduleAdapter } from "../services/legacy-r
     if (smart) {
       const view = smart.dataset.view;
       if (view === "trash") return { items: [menu("打开回收站", "open-view", { value: "trash" }), menu("清空回收站", "empty-trash", { danger: true })], payload: { view } };
-      return { items: [menu("新建笔记", "new-note"), menu("排序方式", null, { submenu: sortItems() }), ...(view === "all" ? [menu("导入笔记", "import")] : [])], payload: { view } };
+      return { items: [menu("新建笔记", "new-note"), menu("排序方式", null, { submenu: sortItems() }), ...(view === "all" ? [menu("导入 Markdown 笔记", "import-markdown")] : [])], payload: { view } };
     }
     const input = target.closest("[data-context='meta-input']"); if (input) return { items: [menu("剪切", "cut"), menu("复制", "copy"), menu("粘贴", "paste"), sep(), menu("全选", "select-all")], payload: { input } };
-    if (target.closest("#noteList")) return { items: [menu("新建笔记", "new-note"), menu("排序方式", null, { submenu: sortItems() }), menu("刷新列表", "refresh")], payload: {} };
-    if (target.closest("#categoryList") || (target.closest("#sidebar") && !target.closest("button,input"))) return { items: [menu("新建文件夹", "add-category"), menu("新建笔记", "new-note"), sep(), menu("导入数据", "import"), menu("备份数据", "export")], payload: {} };
+    if (target.closest("#noteList")) return { items: [menu("新建笔记", "new-note"), menu("导入 Markdown 笔记", "import-markdown"), menu("排序方式", null, { submenu: sortItems() }), menu("刷新列表", "refresh")], payload: {} };
+    if (target.closest("#categoryList") || (target.closest("#sidebar") && !target.closest("button,input"))) return { items: [menu("新建文件夹", "add-category"), menu("新建笔记", "new-note"), sep(), menu("导入 Markdown 笔记", "import-markdown"), menu("导入数据", "import"), menu("备份数据", "export")], payload: {} };
     if (target.closest("button")) return null;
     if (target.closest(".topbar") && !target.closest("button,input,label,select")) return { items: [menu("显示或隐藏区域", null, { submenu: [menu("侧边栏", "toggle-panel", { value: "sidebar" }), menu("笔记列表", "toggle-panel", { value: "list" }), menu("正文", "toggle-panel", { value: "editor" })] }), menu("进入专注模式", "focus"), menu("恢复默认布局", "reset-layout")], payload: {} };
     if (target.closest("#editorPanel")) return { items: [menu("新建笔记", "new-note"), menu("显示或隐藏区域", null, { submenu: [menu("侧边栏", "toggle-panel", { value: "sidebar" }), menu("笔记列表", "toggle-panel", { value: "list" }), menu("正文", "toggle-panel", { value: "editor" })] }), menu("进入专注模式", "focus")], payload: {} };
@@ -1698,6 +1901,10 @@ import { installEasyNoteRuntime, VueScheduleAdapter } from "../services/legacy-r
   }
 
   function bindEvents() {
+    window.addEventListener("easynote:floating-note-lock", (event) => {
+      floatingEditorNoteId = event.detail?.noteId || null;
+      renderEditor(); renderList();
+    });
     document.addEventListener("click", (event) => { if (event.target.closest?.(".nav-item")) flushActiveWorkspace("switch"); }, { capture: true });
     $$(".nav-item").forEach((item) => item.addEventListener("click", () => setActiveView(item.dataset.view)));
     els.categoryList.addEventListener("click", (event) => {
@@ -1734,7 +1941,7 @@ import { installEasyNoteRuntime, VueScheduleAdapter } from "../services/legacy-r
     els.categorySelect.addEventListener("change", () => updateActiveNote({ categoryId: els.categorySelect.value }, true));
     els.tagInput.addEventListener("input", () => updateActiveNote({ tags: els.tagInput.value.split(/[,，]/).map((tag) => tag.trim()).filter(Boolean) }, false));
     els.contentEditor.addEventListener("keydown", applyRichMarkdownShortcut);
-    els.contentEditor.addEventListener("input", () => { updateActiveNote({ content: getCleanPrimaryHtml() }, true); if (outlinePane === "primary") updateOutline(); });
+    els.contentEditor.addEventListener("input", () => { if (replaceCompletedMermaidFences(els.contentEditor)) void hydrateMermaidDiagrams(els.contentEditor); updateActiveNote({ content: getCleanPrimaryHtml() }, true); if (outlinePane === "primary") updateOutline(); });
     els.contentEditor.addEventListener("click", (event) => {
       const link = event.target.closest("a[href]");
       if (link) { event.preventDefault(); link.removeAttribute("target"); link.rel = "noopener noreferrer"; if (event.ctrlKey || event.metaKey || event.shiftKey) openLinkNewTab(link.href); else openLinkInEditor(link.href, link.textContent); return; }
@@ -1807,7 +2014,7 @@ import { installEasyNoteRuntime, VueScheduleAdapter } from "../services/legacy-r
     });
 
     els.exportButton.addEventListener("click", exportData); els.importButton.addEventListener("click", () => els.importFile.click());
-    els.importFile.addEventListener("change", () => { if (els.importFile.files[0]) importData(els.importFile.files[0]); els.importFile.value = ""; });
+    els.importFile.addEventListener("change", () => { if (els.importFile.files[0]) importData(els.importFile.files[0]); els.importFile.value = ""; els.importFile.accept = "application/json,text/markdown,.json,.md,.markdown"; });
     els.themeToggle.addEventListener("click", () => { const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark"; document.documentElement.dataset.theme = next; localStorage.setItem(THEME_KEY, next); });
     els.sidebarToggle.addEventListener("click", () => { els.sidebar.classList.add("open"); els.sidebarScrim.classList.add("open"); }); els.sidebarScrim.addEventListener("click", closeSidebar); els.backToList.addEventListener("click", () => els.workspace.classList.remove("editor-open"));
 
@@ -1829,11 +2036,26 @@ import { installEasyNoteRuntime, VueScheduleAdapter } from "../services/legacy-r
     els.safetyBackdrop.addEventListener("mousedown", (event) => { if (event.target === els.safetyBackdrop) closeSafetyCenter(); });
     els.requestPersistenceButton.addEventListener("click", () => runSafetyTask(els.requestPersistenceButton, () => safety.requestPersistence(), (granted) => granted ? "浏览器持久存储已启用" : "浏览器未授予持久存储，数据库仍可正常使用"));
     els.runIntegrityButton.addEventListener("click", () => runSafetyTask(els.runIntegrityButton, () => safety.integrityCheck({ full: true }), (report) => report?.ok ? "完整性检查通过" : "检查发现问题，请查看数据安全中心"));
-    els.retrySaveButton.addEventListener("click", () => runSafetyTask(els.retrySaveButton, () => safety.retry(), (ok) => ok ? "失败写入已重试并通过校验" : "仍无法保存，请立即导出便携式备份"));
-    els.chooseBackupDirectoryButton.addEventListener("click", () => runSafetyTask(els.chooseBackupDirectoryButton, async () => { await flushActiveWorkspace("manual"); await safety.flush(); return safety.chooseBackupDirectory(); }, (name) => `已选择“${name}”并完成首份备份`));
-    els.backupNowButton.addEventListener("click", () => runSafetyTask(els.backupNowButton, async () => { await flushActiveWorkspace("manual"); await safety.flush(); return safety.backupNow(); }, "目录备份已写入并验证"));
+    els.retrySaveButton.addEventListener("click", () => runSafetyTask(els.retrySaveButton, retryCurrentStateSave, "当前页面已重新保存并通过校验"));
+    els.repairAttachmentsButton?.addEventListener("click", () => runSafetyTask(els.repairAttachmentsButton, repairCurrentAttachments));
+    els.chooseBackupDirectoryButton.addEventListener("click", () => runSafetyTask(els.chooseBackupDirectoryButton, async () => {
+      const name = await safety.chooseBackupDirectory({ backup: false });
+      await flushActiveWorkspace("manual");
+      if (!await safety.flush()) throw new Error(safety.lastError?.message || "当前数据尚未保存，未执行目录备份");
+      await safety.backupNow();
+      return name;
+    }, (name) => `已选择“${name}”并完成首份备份`));
+    els.backupNowButton.addEventListener("click", () => runSafetyTask(els.backupNowButton, async () => {
+      const permission = await safety.getBackupPermission(true);
+      if (permission === "unconfigured") throw new Error("请先选择本地备份目录");
+      if (permission !== "granted") throw new Error("没有备份目录写入权限");
+      await flushActiveWorkspace("manual");
+      if (!await safety.flush()) throw new Error(safety.lastError?.message || "当前数据尚未保存，未执行目录备份");
+      return safety.backupNow();
+    }, "目录备份已写入并验证"));
     els.verifyBackupButton.addEventListener("click", () => runSafetyTask(els.verifyBackupButton, () => safety.verifyLatestBackup(), (result) => `备份验证通过：${result.notes} 篇笔记、${result.tasks} 条任务、${result.schedules} 条日程、${result.whiteboards} 张白板`));
     els.portableExportButton.addEventListener("click", exportData);
+    els.emergencyExportButton?.addEventListener("click", exportEmergencySnapshot);
     els.migrationExportButton.addEventListener("click", exportData);
     els.migrationBannerExport.addEventListener("click", exportData);
     els.migrationBannerDismiss.addEventListener("click", () => { els.migrationBanner.hidden = true; sessionStorage.setItem("easynote-migration-dismissed", "1"); });
@@ -1882,6 +2104,7 @@ import { installEasyNoteRuntime, VueScheduleAdapter } from "../services/legacy-r
     const preferredTheme = localStorage.getItem(THEME_KEY) || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
     document.documentElement.dataset.theme = preferredTheme;
     state = await loadData();
+    safety.storageInfo().then((storage) => { if (storage.supported && !storage.persisted) return safety.requestPersistence(); }).catch((error) => console.warn("Persistent browser storage request failed", error));
     await ensureVueMigrationRecovery();
     if (!Array.isArray(layout.expandedFolders)) layout.expandedFolders = getChildFolders(null).map((folder) => folder.id);
     activeNoteId = state.notes.find((note) => !note.deletedAt)?.id || null;
@@ -1908,18 +2131,21 @@ import { installEasyNoteRuntime, VueScheduleAdapter } from "../services/legacy-r
       persist,
       toast: showToast,
       openTask: (id) => { setActiveView("tasks"); taskManager?.openTask(id); renderSidebar(); },
-      openNote: (id) => { const note = getNote(id); if (!note) return; scheduleManager?.leave(); if (note.categoryId) activeView = `category:${note.categoryId}`; selectNote(id); renderSidebar(); }
+      openNote: (id) => { const note = getNote(id); if (!note) return; scheduleManager?.leave(); if (note.categoryId) activeView = `category:${note.categoryId}`; selectNote(id); renderSidebar(); },
+      getActiveNoteId: () => activeNoteId
     });
     setEditorMode(false); render(); bindEvents();
+    if (safety.restoredFromRescue) showToast("检测到主数据库异常，已从最近的自动救援快照恢复全部数据");
     let quickReport;
     if (safety.wasEmpty) {
       const initialSaved = await persist(true, "migration");
       if (!initialSaved) showToast("初始数据未能安全保存，请打开数据安全中心");
+      else localStorage.setItem(INSTALLATION_MARKER_KEY, "true");
       quickReport = await safety.integrityCheck({ full: false });
     } else {
       quickReport = await safety.integrityCheck({ full: false });
       if (quickReport.ok) await persist(true, "auto");
-      else { setSaveStatus("failed", { error: "启动完整性检查未通过，已停止自动覆盖" }); setTimeout(openSafetyCenter, 350); }
+      else { safety.emitStatus("failed", { error: "启动完整性检查未通过，已停止自动覆盖" }); setTimeout(openSafetyCenter, 350); }
     }
     safety.startAutomaticBackup();
     updateSafetyCenter().catch(console.error);
