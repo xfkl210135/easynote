@@ -137,6 +137,7 @@
       this.lastRescueSnapshotAt = null;
       this.lastLocalBackup = null;
       this.restoredFromRescue = false;
+      this.restoredFromFailedSave = false;
       this.integrityReport = null;
       this.backupDirectoryHandle = null;
       this.wasEmpty = false;
@@ -368,7 +369,7 @@
       const rescueDb = await openRescueDatabase();
       try {
         const existing = await requestResult(rescueDb.transaction(RESCUE_STORE, "readonly").objectStore(RESCUE_STORE).getAll());
-        const archives = existing.filter((item) => item.id !== "latest").sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+        const archives = existing.filter((item) => String(item.id || "").startsWith("archive-")).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
         const makeArchive = !archives[0] || Date.now() - new Date(archives[0].createdAt).getTime() >= RESCUE_ARCHIVE_INTERVAL;
         const transaction = rescueDb.transaction(RESCUE_STORE, "readwrite");
         const store = transaction.objectStore(RESCUE_STORE);
@@ -385,6 +386,84 @@
       await this.put(STORES.meta, { key: "lastRescueSnapshot", createdAt: snapshot.createdAt, checksum: snapshot.checksum, notes: snapshot.data.notes.length, attachments: snapshot.attachments.length });
       this.emitSafety({ rescueCompleted: true, createdAt: snapshot.createdAt });
       return snapshot;
+    }
+
+    failedSaveId() { return `failed-save-${this.instanceId}`; }
+
+    failedSaveChecksumPayload(snapshot) {
+      return { version: snapshot.version, createdAt: snapshot.createdAt, reason: snapshot.reason, data: snapshot.data };
+    }
+
+    async writeFailedSaveSnapshot(state, reason, error) {
+      const snapshot = {
+        id: this.failedSaveId(),
+        version: 1,
+        createdAt: isoNow(),
+        reason: reason || "auto",
+        error: String(error?.message || error || "Unknown verified save failure"),
+        data: structuredClone(state)
+      };
+      snapshot.checksum = await sha256(stableStringify(this.failedSaveChecksumPayload(snapshot)));
+      const rescueDb = await openRescueDatabase();
+      try {
+        const existing = await requestResult(rescueDb.transaction(RESCUE_STORE, "readonly").objectStore(RESCUE_STORE).getAll());
+        const failed = existing.filter((item) => String(item.id || "").startsWith("failed-save-")).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+        const retained = new Set(failed.slice(0, 7).map((item) => item.id));
+        const transaction = rescueDb.transaction(RESCUE_STORE, "readwrite");
+        const store = transaction.objectStore(RESCUE_STORE);
+        store.put(snapshot);
+        for (const item of failed) if (item.id !== snapshot.id && !retained.has(item.id)) store.delete(item.id);
+        await transactionDone(transaction);
+      } finally { rescueDb.close(); }
+      const verified = await rescueGet(snapshot.id);
+      if (!verified || verified.checksum !== snapshot.checksum || await sha256(stableStringify(this.failedSaveChecksumPayload(verified))) !== verified.checksum) throw new Error("保存失败快照写入后校验未通过");
+      this.emitSafety({ failedSaveProtected: true, createdAt: snapshot.createdAt, error: snapshot.error });
+      return snapshot;
+    }
+
+    async removeFailedSaveSnapshot(id = this.failedSaveId()) {
+      const rescueDb = await openRescueDatabase();
+      try {
+        const transaction = rescueDb.transaction(RESCUE_STORE, "readwrite");
+        transaction.objectStore(RESCUE_STORE).delete(id);
+        await transactionDone(transaction);
+      } finally { rescueDb.close(); }
+    }
+
+    mergeFailedSaveState(current, pending) {
+      const merged = { ...structuredClone(current || {}), ...structuredClone(pending || {}), version: 8 };
+      for (const key of ["categories", "files", "notes", "tasks", "taskFields", "taskViews", "scheduleEntries", "scheduleSeries", "scheduleOccurrenceStates", "scheduleDailyNotes", "whiteboards", "focusSessions", "reviews", "goals", "milestones"]) {
+        const pendingItems = Array.isArray(pending?.[key]) ? pending[key] : [];
+        const pendingIds = new Set(pendingItems.map((item) => item?.id).filter(Boolean));
+        const currentOnly = (Array.isArray(current?.[key]) ? current[key] : []).filter((item) => item?.id && !pendingIds.has(item.id));
+        merged[key] = [...pendingItems, ...currentOnly];
+      }
+      return merged;
+    }
+
+    async restoreLatestFailedSave(currentState, lastCommit = null) {
+      const rescueDb = await openRescueDatabase();
+      let candidates;
+      try {
+        candidates = (await requestResult(rescueDb.transaction(RESCUE_STORE, "readonly").objectStore(RESCUE_STORE).getAll()))
+          .filter((item) => String(item.id || "").startsWith("failed-save-"))
+          .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+      } finally { rescueDb.close(); }
+      for (const snapshot of candidates) {
+        if (!snapshot?.data || snapshot.version !== 1 || !Array.isArray(snapshot.data.notes) || !Array.isArray(snapshot.data.categories)) continue;
+        const checksum = await sha256(stableStringify(this.failedSaveChecksumPayload(snapshot)));
+        if (checksum !== snapshot.checksum) continue;
+        if (lastCommit?.committedAt && snapshot.createdAt <= lastCommit.committedAt) { await this.removeFailedSaveSnapshot(snapshot.id); continue; }
+        const merged = this.mergeFailedSaveState(currentState, snapshot.data);
+        const saved = await this.queueSave(merged, true, "failed-save-restore");
+        if (!saved) throw new Error("保存失败快照自动恢复后未能通过回读校验");
+        await this.removeFailedSaveSnapshot(snapshot.id);
+        this.restoredFromFailedSave = true;
+        await this.put(STORES.meta, { key: "failedSaveRestored", createdAt: isoNow(), sourceCreatedAt: snapshot.createdAt, sourceError: snapshot.error || "", notes: merged.notes.length });
+        this.emitSafety({ failedSaveRestored: true, createdAt: snapshot.createdAt, notes: merged.notes.length });
+        return this.load(true);
+      }
+      return null;
     }
 
     async restoreLatestRescue() {
@@ -557,6 +636,8 @@
         whiteboards: whiteboards.map((board) => ({ ...board }))
       };
       const lastCommit = await this.get(STORES.meta, "lastCommit");
+      const failedSaveRecovery = await this.restoreLatestFailedSave(state, lastCommit);
+      if (failedSaveRecovery) return failedSaveRecovery;
       if (lastCommit) this.emitStatus("saved", { verifiedAt: lastCommit.committedAt });
       return state;
     }
@@ -1009,6 +1090,7 @@
         this.emitStatus("saving");
         try {
           let result = await this.saveState(snapshot, reason);
+          await this.removeFailedSaveSnapshot().catch((error) => console.warn("EasyNote stale failed-save snapshot cleanup failed", error));
           result = await this.protectCommittedState(result, reason);
           this.emitStatus(this.pendingSnapshot ? "dirty" : "saved", { verifiedAt: result.committedAt, conflicts: result.conflicts?.length || 0 });
           if (result.conflicts?.length) window.dispatchEvent(new CustomEvent("easynote:sync-conflict", { detail: { conflicts: result.conflicts } }));
@@ -1018,6 +1100,12 @@
           console.error("EasyNote verified save failed", error);
           this.lastError = error;
           if (!this.pendingSnapshot) this.pendingSnapshot = snapshot;
+          try { await this.writeFailedSaveSnapshot(snapshot, reason, error); }
+          catch (protectionError) {
+            this.lastProtectionError = protectionError;
+            console.error("EasyNote failed-save protection also failed", protectionError);
+            this.emitSafety({ failedSaveProtectionError: String(protectionError?.message || protectionError) });
+          }
           this.emitStatus("failed", { error: String(error?.message || error) });
           waiters.forEach((resolve) => resolve(false));
           break;

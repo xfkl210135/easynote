@@ -9,7 +9,15 @@
     <link rel="stylesheet" href="schedule-manager.css" />
     <link rel="stylesheet" href="whiteboard-manager.css" />
   </head>
-  <body>
+  <body class="easynote-booting">
+    <div class="easynote-startup-guard" id="easynoteStartupGuard" role="status" aria-live="polite">
+      <div class="easynote-startup-card">
+        <i aria-hidden="true"></i>
+        <strong>正在安全打开 EasyNote</strong>
+        <span id="easynoteStartupMessage">正在读取并校验本地数据库，请勿刷新或关闭页面…</span>
+        <small>笔记完成读取前不会启用空白工作区，也不会写入示例数据。</small>
+      </div>
+    </div>
     <div class="app-shell">
       <header class="topbar" data-context="topbar">
         <button class="icon-button mobile-only" id="sidebarToggle" aria-label="打开侧边栏" title="菜单">

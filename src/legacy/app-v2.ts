@@ -193,14 +193,27 @@ import { codeSourceFromBlock, editMermaidDiagram, hydrateMermaidDiagrams, mermai
     return data;
   }
 
+  function setStartupStatus(message) {
+    const target = document.querySelector("#easynoteStartupMessage");
+    if (target) target.textContent = message;
+  }
+
+  function finishStartup() {
+    document.body.classList.remove("easynote-booting", "easynote-startup-failed");
+    const guard = document.querySelector("#easynoteStartupGuard");
+    if (guard) guard.hidden = true;
+  }
+
   async function loadData() {
     try {
+      setStartupStatus("正在打开安全数据库并检查最近一次保存…");
       safety = new EasyNoteDataSafety({ onStatus: setSaveStatus });
       const stored = await safety.load();
       storageMode = "indexeddb-verified";
       if (stored) {
         if (!stored.notes.length || isPristineSeedData(stored)) {
           try {
+            setStartupStatus("检测到空白或初始数据，正在核对本机自动备份…");
             const recovered = await safety.restoreLocalAutomaticBackup({ minimumNoteCount: stored.notes.length, replacedState: stored });
             if (recovered) { localStorage.setItem(INSTALLATION_MARKER_KEY, "true"); return normalizeData(recovered); }
           } catch (error) { console.warn("本机自动备份恢复未完成，保留当前数据库内容", error); }
@@ -208,6 +221,7 @@ import { codeSourceFromBlock, editMermaidDiagram, hydrateMermaidDiagrams, mermai
         localStorage.setItem(INSTALLATION_MARKER_KEY, "true");
         return normalizeData(stored);
       }
+      setStartupStatus("主数据库暂时为空，正在从独立救援快照和本机备份恢复…");
       const recovered = await safety.restoreLocalAutomaticBackup();
       if (recovered) { localStorage.setItem(INSTALLATION_MARKER_KEY, "true"); return normalizeData(recovered); }
       let legacy = null;
@@ -2104,6 +2118,9 @@ import { codeSourceFromBlock, editMermaidDiagram, hydrateMermaidDiagrams, mermai
     const preferredTheme = localStorage.getItem(THEME_KEY) || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
     document.documentElement.dataset.theme = preferredTheme;
     state = await loadData();
+    if (safety.restoredFromFailedSave) setStartupStatus("已找回上次保存失败时的修改，正在执行最终完整性检查…");
+    else if (safety.restoredFromRescue) setStartupStatus("已从自动救援快照恢复数据，正在执行最终完整性检查…");
+    else setStartupStatus("数据读取完成，正在执行启动完整性检查…");
     safety.storageInfo().then((storage) => { if (storage.supported && !storage.persisted) return safety.requestPersistence(); }).catch((error) => console.warn("Persistent browser storage request failed", error));
     await ensureVueMigrationRecovery();
     if (!Array.isArray(layout.expandedFolders)) layout.expandedFolders = getChildFolders(null).map((folder) => folder.id);
@@ -2135,7 +2152,8 @@ import { codeSourceFromBlock, editMermaidDiagram, hydrateMermaidDiagrams, mermai
       getActiveNoteId: () => activeNoteId
     });
     setEditorMode(false); render(); bindEvents();
-    if (safety.restoredFromRescue) showToast("检测到主数据库异常，已从最近的自动救援快照恢复全部数据");
+    if (safety.restoredFromFailedSave) showToast("已自动找回上次保存失败时的修改，并重新通过回读校验");
+    else if (safety.restoredFromRescue) showToast("检测到主数据库异常，已从最近的自动救援快照恢复全部数据");
     let quickReport;
     if (safety.wasEmpty) {
       const initialSaved = await persist(true, "migration");
@@ -2149,6 +2167,7 @@ import { codeSourceFromBlock, editMermaidDiagram, hydrateMermaidDiagrams, mermai
     }
     safety.startAutomaticBackup();
     updateSafetyCenter().catch(console.error);
+    finishStartup();
     if (location.protocol === "file:" && !sessionStorage.getItem("easynote-migration-dismissed")) els.migrationBanner.hidden = false;
     if (location.protocol === "http:" && safety.wasEmpty) {
       const desktopDirectoryBackup = "showDirectoryPicker" in window && matchMedia("(min-width: 621px)").matches;
@@ -2160,4 +2179,12 @@ import { codeSourceFromBlock, editMermaidDiagram, hydrateMermaidDiagrams, mermai
     if ("requestIdleCallback" in window) requestIdleCallback(runFullCheck, { timeout: 8000 }); else setTimeout(runFullCheck, 2500);
   }
 
-init().catch((error) => { console.error(error); document.body.innerHTML = `<div style="padding:40px;font-family:sans-serif"><h2>EasyNote 无法启动</h2><p>${escapeHtml(error.message)}</p></div>`; });
+init().catch((error) => {
+  console.error(error);
+  document.body.classList.add("easynote-booting", "easynote-startup-failed");
+  const guard = document.querySelector("#easynoteStartupGuard");
+  if (guard) guard.hidden = false;
+  const heading = guard?.querySelector("strong");
+  if (heading) heading.textContent = "EasyNote 已停止启动以保护数据";
+  setStartupStatus(`${error.message || error}。当前页面不会写入空白数据，请从数据安全中心或本机备份恢复。`);
+});

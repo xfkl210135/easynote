@@ -37,4 +37,30 @@ describe("independent rescue snapshots", () => {
     expect(recovered?.notes[0].content).toContain("kept automatically");
     (recoveredSafety as any).db.close();
   });
+
+  it("durably restores edits captured when a verified save fails", async () => {
+    const original = new EasyNoteDataSafety();
+    const timestamp = new Date().toISOString();
+    const state = {
+      version: 8,
+      categories: [{ id: "folder-failed-save", name: "Safe", color: "#4f7df3", parentId: null }],
+      notes: [{ id: "note-failed-save", title: "Draft", content: "<p>committed text</p>", categoryId: "folder-failed-save", tags: [], favorite: false, createdAt: timestamp, updatedAt: timestamp, deletedAt: null }],
+      files: [], tasks: [], taskFields: [], taskViews: [], scheduleEntries: [], scheduleSeries: [], scheduleOccurrenceStates: [], scheduleDailyNotes: [], whiteboards: [], focusSessions: [], reviews: [], goals: [], milestones: []
+    };
+    expect(await original.queueSave(state, true, "manual")).toBe(true);
+
+    const failedDraft = structuredClone(state);
+    failedDraft.notes[0].content = "<p>text entered before the failed save</p>";
+    failedDraft.notes[0].updatedAt = new Date(Date.now() + 1000).toISOString();
+    (original as any).saveState = async () => { throw new Error("forced verified save failure"); };
+    expect(await original.queueSave(failedDraft, true, "manual")).toBe(false);
+    (original as any).db.close();
+
+    const recoveredSafety = new EasyNoteDataSafety();
+    const recovered = await recoveredSafety.load();
+    expect((recoveredSafety as any).restoredFromFailedSave).toBe(true);
+    expect(recovered?.notes).toHaveLength(1);
+    expect(recovered?.notes[0].content).toContain("text entered before the failed save");
+    (recoveredSafety as any).db.close();
+  });
 });
