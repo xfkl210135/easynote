@@ -376,6 +376,12 @@ body.moving-image { cursor: grabbing; user-select: none; }
 .markdown-editor { resize: none; font-family: "SFMono-Regular", Consolas, monospace; font-size: 14px; line-height: 1.75; }
 .trash-actions { position: absolute; left: 50%; bottom: 22px; transform: translateX(-50%); display: flex; align-items: center; gap: 10px; border: 1px solid var(--border); background: var(--surface); box-shadow: var(--shadow); padding: 9px 10px 9px 15px; border-radius: 11px; z-index: 8; white-space: nowrap; }
 .trash-actions[hidden] { display: none; }
+.trash-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 14px; border-bottom: 1px solid var(--border); background: var(--surface-soft); }
+.trash-toolbar[hidden] { display: none; }
+.trash-toolbar span { margin-right: auto; color: var(--text-soft); font-size: 12px; }
+.trash-toolbar button:disabled { opacity: .45; cursor: not-allowed; }
+.trash-note-select { display: inline-flex; align-items: center; margin-right: 2px; }
+.trash-note-select input { width: 15px; height: 15px; accent-color: var(--primary); }
 .trash-actions span { color: var(--text-soft); font-size: 12px; }
 
 .editor-split-resizer { grid-column: 2; grid-row: 1; position: relative; cursor: col-resize; background: var(--surface); border-left: 1px solid var(--border); border-right: 1px solid var(--border); z-index: 15; touch-action: none; }

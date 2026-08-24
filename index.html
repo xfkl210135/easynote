@@ -218,6 +218,13 @@
               <button class="icon-button mobile-only" id="listClose" aria-label="关闭笔记列表">×</button>
             </div>
           </div>
+          <div class="trash-toolbar" id="trashToolbar" hidden>
+            <span id="trashSelectionSummary">回收站</span>
+            <button class="text-button" id="trashSelectAllButton">全选</button>
+            <button class="secondary-button" id="restoreSelectedButton" disabled>恢复所选</button>
+            <button class="danger-button" id="permanentDeleteSelectedButton" disabled>永久删除所选</button>
+            <button class="danger-button" id="emptyTrashButton">清空回收站</button>
+          </div>
           <div class="note-list" id="noteList" data-context="note-list-space"></div>
         </section>
 

@@ -12,7 +12,7 @@ import { codeSourceFromBlock, editMermaidDiagram, hydrateMermaidDiagrams, mermai
   const THEME_LABELS = Object.freeze({ light: "A · 云雾蓝", warm: "B · 奶油暖杏", mint: "C · 薄荷青黛", purple: "D · 暮光紫灰", rose: "E · 樱雾玫瑰", dark: "F · 深海夜蓝", ice: "G · 冰川冷白" });
   const LAYOUT_KEY = "easynote-layout-v1";
   const INSTALLATION_MARKER_KEY = "easynote-has-saved-user-data";
-  const APP_BUILD = "2026-08-21-storage-recovery-2";
+  const APP_BUILD = "2026-08-24-trash-batch-delete-1";
   const DB_NAME = "easynote-db";
   const DB_STORE = "app-state";
   const MAX_IMAGE_BYTES = 12 * 1024 * 1024;
@@ -39,6 +39,7 @@ import { codeSourceFromBlock, editMermaidDiagram, hydrateMermaidDiagrams, mermai
     markdownEditor: $("#markdownEditor"), formatToolbar: $("#formatToolbar"), modeToggle: $("#modeToggle"),
     favoriteButton: $("#favoriteButton"), deleteButton: $("#deleteButton"), downloadMarkdown: $("#downloadMarkdown"),
     trashActions: $("#trashActions"), restoreButton: $("#restoreButton"), permanentDeleteButton: $("#permanentDeleteButton"),
+    trashToolbar: $("#trashToolbar"), trashSelectionSummary: $("#trashSelectionSummary"), trashSelectAllButton: $("#trashSelectAllButton"), restoreSelectedButton: $("#restoreSelectedButton"), permanentDeleteSelectedButton: $("#permanentDeleteSelectedButton"), emptyTrashButton: $("#emptyTrashButton"),
     importButton: $("#importButton"), exportButton: $("#exportButton"), importFile: $("#importFile"),
     imageFile: $("#imageFile"), insertImage: $("#insertImage"), insertLink: $("#insertLink"), clearFormat: $("#clearFormat"),
     fontFamilySelect: $("#fontFamilySelect"), fontSizeSelect: $("#fontSizeSelect"), formatPainterButton: $("#formatPainterButton"),
@@ -96,6 +97,7 @@ import { codeSourceFromBlock, editMermaidDiagram, hydrateMermaidDiagrams, mermai
   let dragDepth = 0;
   let layout = loadLayout();
   let selectedImage = null;
+  let selectedTrashNoteIds = new Set();
   let outlinePane = "primary";
   let dialogState = null;
   let pendingUploadFolderId = "";
@@ -425,6 +427,46 @@ import { codeSourceFromBlock, editMermaidDiagram, hydrateMermaidDiagrams, mermai
     });
   }
 
+  function isEmptyNote(note) {
+    if (!note) return false;
+    const title = String(note.title || "").replace(/\u200b/g, "").trim();
+    const content = String(note.content || "");
+    const text = stripHtml(content).replace(/\u200b/g, "").trim();
+    const hasRichContent = /<(?:img|hr|input|video|audio|iframe|svg)\b|data-attachment-id|data-mermaid-source|data-code-language\s*=\s*["']?mermaid/i.test(content);
+    const tags = Array.isArray(note.tags) ? note.tags.filter((tag) => String(tag || "").trim()) : [];
+    return !title && !text && !hasRichContent && tags.length === 0 && !note.favorite;
+  }
+
+  function updateTrashToolbar() {
+    const inTrash = activeView === "trash";
+    const trashNotes = state?.notes?.filter((note) => note.deletedAt) || [];
+    const validIds = new Set(trashNotes.map((note) => note.id));
+    selectedTrashNoteIds = new Set([...selectedTrashNoteIds].filter((id) => validIds.has(id)));
+    const selectedCount = selectedTrashNoteIds.size;
+    if (!els.trashToolbar) return;
+    els.trashToolbar.hidden = !inTrash;
+    if (els.trashSelectionSummary) els.trashSelectionSummary.textContent = selectedCount ? `已选择 ${selectedCount} 篇` : `回收站共 ${trashNotes.length} 篇`;
+    const visible = getVisibleNotes();
+    const allSelected = visible.length > 0 && visible.every((note) => selectedTrashNoteIds.has(note.id));
+    if (els.trashSelectAllButton) { els.trashSelectAllButton.textContent = allSelected ? "取消全选" : "全选"; els.trashSelectAllButton.disabled = visible.length === 0; }
+    if (els.restoreSelectedButton) els.restoreSelectedButton.disabled = selectedCount === 0;
+    if (els.permanentDeleteSelectedButton) els.permanentDeleteSelectedButton.disabled = selectedCount === 0;
+    if (els.emptyTrashButton) els.emptyTrashButton.disabled = trashNotes.length === 0;
+  }
+
+  function toggleTrashSelection(id, selected) {
+    if (!id) return;
+    if (selected) selectedTrashNoteIds.add(id); else selectedTrashNoteIds.delete(id);
+    updateTrashToolbar();
+  }
+
+  function toggleSelectAllTrash() {
+    const visible = getVisibleNotes();
+    const allSelected = visible.length > 0 && visible.every((note) => selectedTrashNoteIds.has(note.id));
+    visible.forEach((note) => allSelected ? selectedTrashNoteIds.delete(note.id) : selectedTrashNoteIds.add(note.id));
+    renderList();
+  }
+
   function formatDate(value, detailed = false) {
     if (!value) return "";
     const date = new Date(value);
@@ -497,6 +539,7 @@ import { codeSourceFromBlock, editMermaidDiagram, hydrateMermaidDiagrams, mermai
 
   function renderList() {
     const notes = getVisibleNotes();
+    updateTrashToolbar();
     els.viewTitle.textContent = searchTerm ? `搜索“${searchTerm}”` : viewLabel();
     els.viewCount.textContent = `${notes.length} 篇`;
     if (!notes.length) {
@@ -513,6 +556,13 @@ import { codeSourceFromBlock, editMermaidDiagram, hydrateMermaidDiagrams, mermai
         <div class="note-card-meta"><time>${formatDate(note.updatedAt)}</time>${category ? `<span class="category-pill">${escapeHtml(category.name)}</span>` : ""}</div>
       </article>`;
     }).join("");
+    if (activeView === "trash") {
+      els.noteList.querySelectorAll(".note-card").forEach((card) => {
+        const id = card.dataset.noteId;
+        const top = card.querySelector(".note-card-top");
+        if (top && !top.querySelector("[data-trash-select]")) top.insertAdjacentHTML("afterbegin", `<label class="trash-note-select" title="选择笔记"><input type="checkbox" data-trash-select="${escapeAttr(id)}" ${selectedTrashNoteIds.has(id) ? "checked" : ""} aria-label="选择笔记"></label>`);
+      });
+    }
   }
 
   function dataUrlToBlob(dataUrl) {
@@ -683,6 +733,7 @@ import { codeSourceFromBlock, editMermaidDiagram, hydrateMermaidDiagrams, mermai
     leaveWorkspaceModes();
     flushEditor(); closeContextMenu(); activeView = view; searchTerm = ""; els.searchInput.value = "";
     activeFileId = null; activeLinkUrl = null;
+    if (view !== "trash") selectedTrashNoteIds.clear();
     if (view.startsWith("category:")) expandFolderPath(view.slice(9));
     const visible = getVisibleNotes();
     if (!visible.some((note) => note.id === activeNoteId)) activeNoteId = visible[0]?.id || null;
@@ -1306,6 +1357,47 @@ import { codeSourceFromBlock, editMermaidDiagram, hydrateMermaidDiagrams, mermai
     persist(true, "danger"); render(); showToast("回收站已清空，可在数据安全中心恢复 30 天");
   }
 
+  async function deleteNoteSafely(id = activeNoteId) {
+    const note = getNote(id);
+    if (!note) return;
+    if (!isEmptyNote(note)) return moveToTrash(id);
+    try { await safety.recordRecovery("note-empty-delete", `已直接清除空笔记：${note.title || "无标题笔记"}`, structuredClone(note)); }
+    catch (error) { showToast(`空笔记未清除：安全记录失败（${error?.message || "请重试"}）`); return; }
+    state.notes = state.notes.filter((item) => item.id !== id);
+    selectedTrashNoteIds.delete(id);
+    if (id === activeNoteId) activeNoteId = getVisibleNotes()[0]?.id || null;
+    const saved = await persist(true, "danger");
+    render();
+    showToast(saved ? "空笔记已直接清除（可在数据安全中心恢复）" : "空笔记已移除，保存失败；请打开数据安全中心重试");
+  }
+
+  async function restoreSelectedTrash() {
+    const notes = state.notes.filter((note) => selectedTrashNoteIds.has(note.id) && note.deletedAt);
+    if (!notes.length) return showToast("请先选择要恢复的笔记");
+    notes.forEach((note) => { note.deletedAt = null; note.updatedAt = now(); });
+    selectedTrashNoteIds.clear();
+    const saved = await persist(true, "manual");
+    if (activeView === "trash") { activeView = "all"; activeNoteId = notes[0]?.id || null; }
+    render();
+    showToast(saved ? `已恢复 ${notes.length} 篇笔记` : "恢复已保留在当前页面，但保存失败；请打开数据安全中心重试");
+  }
+
+  async function permanentlyDeleteSelected() {
+    const notes = state.notes.filter((note) => selectedTrashNoteIds.has(note.id) && note.deletedAt);
+    if (!notes.length) return showToast("请先选择要永久删除的笔记");
+    const confirmed = await showConfirmDialog({ title: "永久删除所选笔记", message: `确定永久删除所选 ${notes.length} 篇笔记吗？此操作无法撤销。`, confirmText: "永久删除", danger: true });
+    if (!confirmed) return;
+    try { await safety.recordRecovery("trash-batch-delete", `已永久删除所选 ${notes.length} 篇笔记`, { notes: structuredClone(notes) }); }
+    catch (error) { showToast(`未执行永久删除：安全记录失败（${error?.message || "请重试"}）`); return; }
+    const ids = new Set(notes.map((note) => note.id));
+    state.notes = state.notes.filter((note) => !ids.has(note.id));
+    selectedTrashNoteIds.clear();
+    if (ids.has(activeNoteId)) activeNoteId = getVisibleNotes()[0]?.id || null;
+    const saved = await persist(true, "danger");
+    render();
+    showToast(saved ? `已永久删除 ${notes.length} 篇笔记，可在数据安全中心恢复` : "删除已保留在当前页面，但保存失败；请打开数据安全中心重试");
+  }
+
   function downloadFile(name, content, type) {
     const blob = new Blob([content], { type });
     const anchor = document.createElement("a");
@@ -1925,7 +2017,7 @@ import { codeSourceFromBlock, editMermaidDiagram, hydrateMermaidDiagrams, mermai
     else if (action === "open-link-tab") openLinkNewTab(value);
     else if (action === "copy-link") navigator.clipboard?.writeText(value).then(() => showToast("链接已复制")).catch(() => showToast("复制失败，请手动复制"));
     else if (action === "export-note") exportNoteMarkdown(value);
-    else if (action === "trash-note") moveToTrash(value);
+    else if (action === "trash-note") deleteNoteSafely(value);
     else if (action === "restore-note") restoreNote(value);
     else if (action === "permanent-delete") permanentlyDelete(value);
     else if (action === "new-note") createNote(value || undefined);
@@ -1934,6 +2026,9 @@ import { codeSourceFromBlock, editMermaidDiagram, hydrateMermaidDiagrams, mermai
     else if (action === "rename-category") renameCategory(value);
     else if (action === "delete-category") deleteCategory(value);
     else if (action === "empty-trash") emptyTrash();
+    else if (action === "select-trash-all") toggleSelectAllTrash();
+    else if (action === "restore-selected-trash") restoreSelectedTrash();
+    else if (action === "permanent-delete-selected") permanentlyDeleteSelected();
     else if (action === "sort") { els.sortSelect.value = value; renderList(); }
     else if (action === "import") els.importFile.click();
     else if (action === "import-markdown") triggerMarkdownImport();
@@ -1971,6 +2066,7 @@ import { codeSourceFromBlock, editMermaidDiagram, hydrateMermaidDiagrams, mermai
     const taskContext = taskManager?.contextForTarget(target); if (taskContext) return taskContext;
     const scheduleContext = scheduleManager?.contextForTarget?.(target); if (scheduleContext) return scheduleContext;
     if (target.closest("#secondaryContent")) return null;
+    if (activeView === "trash" && target.closest("#noteList")) return { items: [menu("全选/取消全选", "select-trash-all"), menu("恢复所选", "restore-selected-trash"), menu("永久删除所选", "permanent-delete-selected", { danger: true }), sep(), menu("清空回收站", "empty-trash", { danger: true })], payload: {} };
     const link = target.closest("#contentEditor a[href]");
     if (link) return { items: linkMenu(link), payload: { link } };
     const image = target.closest("#contentEditor img");
@@ -2050,6 +2146,21 @@ import { codeSourceFromBlock, editMermaidDiagram, hydrateMermaidDiagrams, mermai
   }
 
   function bindEvents() {
+    // Capture the delete action before the legacy listener so empty notes bypass the trash.
+    els.deleteButton.addEventListener("click", (event) => { event.preventDefault(); event.stopImmediatePropagation(); deleteNoteSafely(); }, true);
+    els.noteList.addEventListener("click", (event) => {
+      const checkbox = event.target.closest?.("[data-trash-select]");
+      if (!checkbox) return;
+      event.stopPropagation();
+    }, true);
+    els.noteList.addEventListener("change", (event) => {
+      const checkbox = event.target.closest?.("[data-trash-select]");
+      if (checkbox) toggleTrashSelection(checkbox.dataset.trashSelect, checkbox.checked);
+    });
+    els.trashSelectAllButton?.addEventListener("click", toggleSelectAllTrash);
+    els.restoreSelectedButton?.addEventListener("click", restoreSelectedTrash);
+    els.permanentDeleteSelectedButton?.addEventListener("click", permanentlyDeleteSelected);
+    els.emptyTrashButton?.addEventListener("click", emptyTrash);
     window.addEventListener("easynote:floating-note-lock", (event) => {
       floatingEditorNoteId = event.detail?.noteId || null;
       renderEditor(); renderList();

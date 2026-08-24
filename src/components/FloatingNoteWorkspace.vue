@@ -22,28 +22,66 @@ const compactPane = ref<"list" | "editor">("editor");
 const folderPanelVisible = ref(localStorage.getItem("easynote-floating-folders-visible") !== "false");
 const noteListVisible = ref(localStorage.getItem("easynote-floating-list-visible") !== "false");
 const notePickerOpen = ref(false);
+const recentPickerOpen = ref(false);
+const folderPickerOpen = ref(false);
 const expandedPickerFolders = ref<Set<string>>(new Set());
-const newlyCreatedNoteIds = ref<Set<string>>(new Set());
 const contextMenu = ref<{ x: number; y: number; noteId: string } | null>(null);
 const historyOpen = ref(false);
 const historyItems = ref<Array<{ id: string; createdAt: string; reason: string; snapshot: Note }>>([]);
 let savedRange: Range | null = null;
 let statusToken = 0;
+let uiRefreshTimer = 0;
+let editorLoadToken = 0;
+let autoSaveTimer = 0;
+const plainTextCache = new Map<string, string>();
 
 const runtime = computed(() => easyNoteRuntime.value);
 const state = computed(() => { revision.value; return runtime.value?.state ?? null; });
 const folders = computed(() => state.value?.categories ?? []);
 const activeNote = computed(() => state.value?.notes.find((note) => note.id === selectedNoteId.value) ?? null);
-const canChooseNoteFolder = computed(() => Boolean(activeNote.value && newlyCreatedNoteIds.value.has(activeNote.value.id)));
+const canChooseNoteFolder = computed(() => Boolean(activeNote.value && !activeNote.value.deletedAt));
 const selectedFolderId = computed(() => selectedView.value.startsWith("folder:") ? selectedView.value.slice(7) : "");
+const recentNotes = computed(() => (state.value?.notes ?? [])
+  .filter((note) => !note.deletedAt)
+  .slice()
+  .sort((left, right) => String(right.updatedAt).localeCompare(String(left.updatedAt)))
+  .slice(0, 10));
+const folderPickerRows = computed(() => {
+  const rows: Array<{ folder: Folder; level: number }> = [];
+  const byParent = new Map<string, Folder[]>();
+  const known = new Set(folders.value.map((folder) => folder.id));
+  for (const folder of folders.value) {
+    const parentId = folder.parentId && known.has(folder.parentId) ? folder.parentId : "";
+    const siblings = byParent.get(parentId) ?? [];
+    siblings.push(folder); byParent.set(parentId, siblings);
+  }
+  const append = (parentId: string, level: number, seen = new Set<string>()) => {
+    for (const folder of (byParent.get(parentId) ?? []).slice().sort((left, right) => left.name.localeCompare(right.name, "zh-CN"))) {
+      if (seen.has(folder.id)) continue;
+      rows.push({ folder, level }); append(folder.id, level + 1, new Set(seen).add(folder.id));
+    }
+  };
+  append("", 0);
+  return rows;
+});
 
 function touch() { revision.value += 1; }
+function scheduleUiRefresh(delay = 120) {
+  window.clearTimeout(uiRefreshTimer);
+  uiRefreshTimer = window.setTimeout(() => { uiRefreshTimer = 0; touch(); }, delay);
+}
 function now() { return new Date().toISOString(); }
 function makeId(prefix: string) { return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`; }
 function windowForWorkspace(): Window { return editor.value?.ownerDocument.defaultView ?? window; }
 function plainText(html: string): string {
-  const container = document.createElement("div"); container.innerHTML = html || "";
-  return (container.textContent || "").replace(/\s+/g, " ").trim();
+  const source = html || "";
+  const cached = plainTextCache.get(source);
+  if (cached !== undefined) return cached;
+  const container = document.createElement("div"); container.innerHTML = source;
+  const value = (container.textContent || "").replace(/\s+/g, " ").trim();
+  if (plainTextCache.size > 600) plainTextCache.clear();
+  plainTextCache.set(source, value);
+  return value;
 }
 function formatDate(value: string): string {
   const date = new Date(value);
@@ -134,11 +172,19 @@ function toggleNoteList(force?: boolean) {
 
 async function persist(immediate = false, reason = "auto") {
   const current = runtime.value; if (!current) return false;
+  if (immediate) { window.clearTimeout(autoSaveTimer); autoSaveTimer = 0; }
   const token = ++statusToken;
   saveStatus.value = immediate ? "saving" : "dirty";
   const saved = await current.persist(immediate, reason);
   if (token === statusToken) saveStatus.value = saved ? "saved" : "failed";
+  if (saved && immediate) scheduleUiRefresh(0);
   return saved;
+}
+
+function scheduleAutoSave(delay = 350) {
+  window.clearTimeout(autoSaveTimer);
+  saveStatus.value = "dirty";
+  autoSaveTimer = window.setTimeout(() => { autoSaveTimer = 0; void persist(true, "auto"); }, delay);
 }
 
 function syncRichContent() {
@@ -146,7 +192,7 @@ function syncRichContent() {
   if (!note || !root || note.deletedAt || editMode.value !== "rich") return;
   ensureTrailingParagraph(root);
   if (replaceCompletedMermaidFences(root)) void hydrateMermaidDiagrams(root);
-  note.content = floatingHtmlForStorage(root); note.updatedAt = now(); touch(); void persist(false, "auto");
+  note.content = floatingHtmlForStorage(root); note.updatedAt = now(); scheduleUiRefresh(); scheduleAutoSave();
   root.ownerDocument.defaultView?.setTimeout(convertRichMarkdownShortcut, 0);
 }
 
@@ -179,7 +225,7 @@ function convertRichMarkdownShortcut() {
   if (rule.list) replacement.append(caretTarget);
   block.replaceWith(replacement);
   const caret = root.ownerDocument.createRange(); caret.selectNodeContents(caretTarget); caret.collapse(false); selection.removeAllRanges(); selection.addRange(caret); savedRange = caret.cloneRange();
-  const note = activeNote.value; if (note) { note.content = floatingHtmlForStorage(root); note.updatedAt = now(); touch(); void persist(false, "auto"); }
+  const note = activeNote.value; if (note) { note.content = floatingHtmlForStorage(root); note.updatedAt = now(); scheduleUiRefresh(); scheduleAutoSave(); }
 }
 
 function applyRichMarkdownShortcut(event: KeyboardEvent): boolean {
@@ -256,9 +302,9 @@ function deleteTextBlock(block: HTMLElement | null) {
   block.remove(); selectedTextBlock.value = null; ensureTrailingParagraph(root);
   placeCaretAtEnd(previous || root.lastElementChild as HTMLElement || root); syncRichContent();
 }
-function updateTitle(value: string) { const note = activeNote.value; if (!note || note.deletedAt) return; note.title = value; note.updatedAt = now(); touch(); void persist(false, "auto"); }
+function updateTitle(value: string) { const note = activeNote.value; if (!note || note.deletedAt) return; note.title = value; note.updatedAt = now(); scheduleUiRefresh(); scheduleAutoSave(); }
 function updateCategory(value: string) { const note = activeNote.value; if (!note || note.deletedAt || !canChooseNoteFolder.value) return; note.categoryId = value; note.updatedAt = now(); touch(); void persist(true, "manual"); }
-function updateTags(value: string) { const note = activeNote.value; if (!note || note.deletedAt) return; note.tags = value.split(/[,，]/).map((tag) => tag.trim()).filter(Boolean); note.updatedAt = now(); touch(); void persist(false, "auto"); }
+function updateTags(value: string) { const note = activeNote.value; if (!note || note.deletedAt) return; note.tags = value.split(/[,，]/).map((tag) => tag.trim()).filter(Boolean); note.updatedAt = now(); scheduleUiRefresh(); scheduleAutoSave(); }
 
 async function flushCurrent(reason = "switch") {
   const note = activeNote.value;
@@ -269,11 +315,20 @@ async function flushCurrent(reason = "switch") {
 
 async function selectNote(id: string) {
   if (id === selectedNoteId.value) { compactPane.value = "editor"; return; }
-  if (selectedNoteId.value) await flushCurrent("switch");
+  if (selectedNoteId.value) void flushCurrent("switch");
   selectedNoteId.value = id; selectedImage.value = null; editMode.value = "rich"; compactPane.value = "editor";
   dispatchLock(id);
-  await nextTick();
-  if (editor.value) { editor.value.innerHTML = activeNote.value?.content || ""; ensureTrailingParagraph(editor.value); void hydrateMermaidDiagrams(editor.value); }
+  loadEditorContent();
+}
+
+function loadEditorContent() {
+  const token = ++editorLoadToken;
+  void nextTick().then(() => {
+    if (token !== editorLoadToken || !editor.value) return;
+    editor.value.innerHTML = activeNote.value?.content || "";
+    ensureTrailingParagraph(editor.value);
+    window.setTimeout(() => { if (token === editorLoadToken && editor.value) void hydrateMermaidDiagrams(editor.value); }, 0);
+  });
 }
 
 async function selectNoteFromPicker(id: string) {
@@ -285,6 +340,7 @@ async function selectNoteFromPicker(id: string) {
 
 function toggleNotePicker() {
   notePickerOpen.value = !notePickerOpen.value;
+  recentPickerOpen.value = false; folderPickerOpen.value = false;
   if (!notePickerOpen.value) return;
   const next = new Set(expandedPickerFolders.value);
   let folderId = activeNote.value?.categoryId || "__unfiled__";
@@ -296,6 +352,29 @@ function toggleNotePicker() {
     folderId = folder?.parentId || "";
   }
   expandedPickerFolders.value = next;
+}
+
+function toggleRecentPicker() {
+  recentPickerOpen.value = !recentPickerOpen.value;
+  notePickerOpen.value = false; folderPickerOpen.value = false;
+}
+
+function toggleFolderPicker() {
+  folderPickerOpen.value = !folderPickerOpen.value;
+  notePickerOpen.value = false; recentPickerOpen.value = false;
+}
+
+async function selectRecentNote(id: string) {
+  recentPickerOpen.value = false;
+  await selectNote(id);
+}
+
+async function selectFolder(folderId: string) {
+  const note = activeNote.value;
+  folderPickerOpen.value = false;
+  if (!note || note.deletedAt || note.categoryId === folderId) return;
+  note.categoryId = folderId; note.updatedAt = now(); touch();
+  await persist(true, "manual");
 }
 
 function togglePickerFolder(id: string) {
@@ -381,7 +460,7 @@ async function toggleMode() {
   else { note.content = markdownToHtml(markdownText.value); editMode.value = "rich"; await nextTick(); if (editor.value) { editor.value.innerHTML = note.content; void hydrateMermaidDiagrams(editor.value); } }
   note.updatedAt = now(); touch(); void persist(true, "manual");
 }
-function onMarkdownInput() { const note = activeNote.value; if (!note || note.deletedAt) return; note.content = markdownToHtml(markdownText.value); note.updatedAt = now(); touch(); void persist(false, "auto"); }
+function onMarkdownInput() { const note = activeNote.value; if (!note || note.deletedAt) return; note.content = markdownToHtml(markdownText.value); note.updatedAt = now(); scheduleUiRefresh(); scheduleAutoSave(); }
 
 async function processImage(file: File): Promise<Blob> {
   if (!/^image\/(jpeg|png|webp|gif)$/.test(file.type)) throw new Error("仅支持 JPEG、PNG、WebP 和 GIF 图片");
@@ -492,9 +571,9 @@ function imageAction(action: "small" | "medium" | "large" | "full" | "left" | "c
 async function createNote() {
   const current = state.value; if (!current) return;
   const targetFolderId = selectedFolderId.value || activeNote.value?.categoryId || "";
-  if (selectedNoteId.value) await flushCurrent("switch");
+  if (selectedNoteId.value) void flushCurrent("switch");
   const stamp = now(), note: Note = { id: makeId("note"), title: "", categoryId: targetFolderId, tags: [], favorite: false, content: "", createdAt: stamp, updatedAt: stamp, deletedAt: null };
-  current.notes.unshift(note); newlyCreatedNoteIds.value = new Set(newlyCreatedNoteIds.value).add(note.id); selectedView.value = "all"; selectedNoteId.value = note.id; selectedImage.value = null; editMode.value = "rich"; compactPane.value = "editor"; touch(); dispatchLock(note.id);
+  current.notes.unshift(note); selectedView.value = "all"; selectedNoteId.value = note.id; selectedImage.value = null; editMode.value = "rich"; compactPane.value = "editor"; touch(); dispatchLock(note.id);
   await nextTick(); if (editor.value) editor.value.innerHTML = "";
   void persist(true, "manual");
 }
@@ -520,8 +599,11 @@ async function openHistory() { const note = activeNote.value, current = runtime.
 async function restoreHistory(id: string) { const note = activeNote.value, current = runtime.value; if (!note || !current) return; const snapshot = await current.safety.getHistorySnapshot(id); if (!snapshot) return; await current.safety.recordRecovery("history-restore", `恢复笔记历史“${note.title || "无标题笔记"}”前`, { note: structuredClone(note) }); Object.assign(note, snapshot, { id: note.id, updatedAt: now(), deletedAt: null }); touch(); historyOpen.value = false; await persist(true, "manual"); await nextTick(); if (editor.value) { editor.value.innerHTML = note.content; void hydrateMermaidDiagrams(editor.value); } }
 function downloadMarkdown() { const note = activeNote.value; if (!note) return; const content = editMode.value === "markdown" ? markdownText.value : htmlToMarkdown(editor.value?.innerHTML || note.content); const blob = new Blob([content], { type: "text/markdown;charset=utf-8" }); const url = URL.createObjectURL(blob), anchor = editor.value?.ownerDocument.createElement("a") ?? document.createElement("a"); anchor.href = url; anchor.download = `${(note.title || "无标题笔记").replace(/[\\/:*?"<>|]/g, "-")}.md`; anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); }
 
-function onSaveStatus() { touch(); }
-function onDocumentClick() { contextMenu.value = null; editorContextMenu.value = null; notePickerOpen.value = false; }
+function onSaveStatus(event: Event) {
+  const status = (event as CustomEvent<{ status?: "saved" | "dirty" | "saving" | "failed" }>).detail?.status;
+  if (status) saveStatus.value = status;
+}
+function onDocumentClick() { contextMenu.value = null; editorContextMenu.value = null; notePickerOpen.value = false; recentPickerOpen.value = false; folderPickerOpen.value = false; }
 function onKeydown(event: KeyboardEvent) {
   if (!(event.ctrlKey || event.metaKey)) return;
   if (event.key.toLowerCase() === "s") { event.preventDefault(); void flushCurrent("manual"); }
@@ -529,7 +611,7 @@ function onKeydown(event: KeyboardEvent) {
   if (event.key.toLowerCase() === "k") { event.preventDefault(); (editor.value?.ownerDocument.querySelector(".floating-note-search") as HTMLInputElement | null)?.focus(); }
 }
 
-watch(() => activeNote.value?.id, async () => { await nextTick(); if (editor.value && editMode.value === "rich") { editor.value.innerHTML = activeNote.value?.content || ""; ensureTrailingParagraph(editor.value); void hydrateMermaidDiagrams(editor.value); } });
+watch(() => activeNote.value?.id, () => { if (editMode.value === "rich") loadEditorContent(); });
 watch(easyNoteRuntime, async (current) => { if (current && !selectedNoteId.value) { const initial = current.getActiveNoteId() || current.state.notes.find((note) => !note.deletedAt)?.id || ""; if (initial) await selectNote(initial); } });
 onMounted(async () => {
   window.addEventListener("easynote:save-status", onSaveStatus);
@@ -538,6 +620,8 @@ onMounted(async () => {
   const doc = editor.value?.ownerDocument; doc?.addEventListener("selectionchange", captureSelection); doc?.addEventListener("keydown", onKeydown); doc?.addEventListener("click", onDocumentClick);
 });
 onBeforeUnmount(() => {
+  window.clearTimeout(uiRefreshTimer);
+  window.clearTimeout(autoSaveTimer);
   window.removeEventListener("easynote:save-status", onSaveStatus);
   const doc = editor.value?.ownerDocument; doc?.removeEventListener("selectionchange", captureSelection); doc?.removeEventListener("keydown", onKeydown); doc?.removeEventListener("click", onDocumentClick);
   dispatchLock(""); void flushCurrent("switch");
@@ -606,6 +690,14 @@ onBeforeUnmount(() => {
           <div class="floating-editor-scroll">
             <input class="floating-title-input" :value="activeNote.title" :disabled="Boolean(activeNote.deletedAt)" placeholder="无标题笔记" @input="updateTitle(($event.target as HTMLInputElement).value)">
             <div class="floating-meta-row">
+              <div class="floating-recent-picker">
+                <button class="floating-recent-trigger" type="button" aria-label="最近编辑的笔记" :aria-expanded="recentPickerOpen" @click.stop="toggleRecentPicker"><span>最近</span><strong>快速切换</strong><b>⌄</b></button>
+                <div v-if="recentPickerOpen" class="floating-recent-popover" @click.stop>
+                  <div class="floating-recent-heading"><strong>最近编辑</strong><span>最多显示 10 篇</span></div>
+                  <button v-for="note in recentNotes" :key="note.id" type="button" :class="{ active: note.id === selectedNoteId }" @click="selectRecentNote(note.id)"><span>{{ note.title || '无标题笔记' }}</span><time>{{ formatDate(note.updatedAt) }}</time></button>
+                  <p v-if="!recentNotes.length">暂无最近笔记</p>
+                </div>
+              </div>
               <div class="floating-note-picker">
                 <span>切换笔记</span>
                 <button class="floating-note-picker-trigger" type="button" aria-label="切换具体笔记" :aria-expanded="notePickerOpen" @click.stop="toggleNotePicker"><span>{{ folderPath(activeNote.categoryId) || '未归档' }}</span><strong>{{ activeNote.title || '无标题笔记' }}</strong><b>⌄</b></button>
@@ -619,8 +711,16 @@ onBeforeUnmount(() => {
                   </div>
                 </div>
               </div>
-              <label class="floating-folder-location" :title="canChooseNoteFolder ? '为新笔记选择保存位置' : '已有笔记保持原文件夹位置'"><span>{{ canChooseNoteFolder ? '保存到' : '所在文件夹' }}</span><select :value="activeNote.categoryId" :disabled="Boolean(activeNote.deletedAt) || !canChooseNoteFolder" @change="updateCategory(($event.target as HTMLSelectElement).value)"><option value="">未归档</option><option v-for="folder in folders" :key="folder.id" :value="folder.id">{{ folderPath(folder.id) }}</option></select><i v-if="!canChooseNoteFolder" aria-label="位置已固定">🔒</i></label>
-              <label><span>标签</span><input :value="(activeNote.tags || []).join(', ')" :disabled="Boolean(activeNote.deletedAt)" placeholder="多个标签用逗号分隔" @input="updateTags(($event.target as HTMLInputElement).value)"></label>
+              <div class="floating-folder-picker">
+                <span>所在文件夹</span>
+                <button class="floating-folder-picker-trigger" type="button" :disabled="Boolean(activeNote.deletedAt)" :aria-expanded="folderPickerOpen" @click.stop="toggleFolderPicker"><strong>{{ folderPath(activeNote.categoryId) || '未归档' }}</strong><b>⌄</b></button>
+                <div v-if="folderPickerOpen" class="floating-folder-picker-popover" @click.stop>
+                  <div class="floating-recent-heading"><strong>移动到文件夹</strong><span>可随时更改</span></div>
+                  <button type="button" :class="{ active: !activeNote.categoryId }" @click="selectFolder('')"><span>未归档</span></button>
+                  <button v-for="row in folderPickerRows" :key="row.folder.id" type="button" :class="{ active: activeNote.categoryId === row.folder.id }" :style="{ paddingLeft: `${12 + row.level * 18}px` }" @click="selectFolder(row.folder.id)"><i :style="{ background: row.folder.color || '#4f7df3' }"></i><span>{{ row.folder.name }}</span></button>
+                </div>
+              </div>
+              <label class="floating-tags-field" title="标签用于跨文件夹分类和搜索，例如：面试、Redis、待整理"><span>标签 <small>用于搜索</small></span><input :value="(activeNote.tags || []).join(', ')" :disabled="Boolean(activeNote.deletedAt)" placeholder="如：面试, Redis" @input="updateTags(($event.target as HTMLInputElement).value)"></label>
               <button type="button" @click="toggleMode">{{ editMode === 'rich' ? 'Markdown' : '富文本' }}</button>
             </div>
             <div v-if="editMode === 'rich' && !activeNote.deletedAt" class="floating-format-toolbar" @mousedown.prevent>
@@ -674,7 +774,7 @@ onBeforeUnmount(() => {
 .floating-note-list-heading{min-height:72px;display:grid;grid-template-columns:1fr auto;gap:6px;padding:10px 10px;border-bottom:1px solid var(--fn-border);background:var(--fn-surface)}.floating-note-list-heading>div{min-width:0;display:grid}.floating-note-list-heading strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.floating-note-list-heading span{color:var(--fn-muted);font-size:10px}.floating-note-list-heading select{max-width:102px;border:1px solid var(--fn-border);border-radius:7px;color:var(--fn-muted);background:var(--fn-surface);font-size:10px}.floating-new-note{grid-column:1/-1;height:30px;border:0;border-radius:7px;color:#fff;background:#4f7df3;font-weight:650}
 .floating-note-cards{min-height:0;flex:1;overflow:auto;padding:8px}.floating-note-cards article{display:grid;gap:7px;margin-bottom:6px;padding:11px;border:1px solid transparent;border-radius:10px;background:var(--fn-surface);cursor:pointer}.floating-note-cards article:hover,.floating-note-cards article.active{border-color:color-mix(in srgb,#4f7df3 42%,var(--fn-border));box-shadow:0 5px 16px rgba(15,23,42,.06)}.floating-note-cards article>div{display:flex;gap:6px}.floating-note-cards article strong{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px}.floating-note-cards article>div span{color:#e3a008}.floating-note-cards article p{height:34px;margin:0;overflow:hidden;color:var(--fn-muted);font-size:10px;line-height:17px}.floating-note-cards article footer{display:flex;justify-content:space-between;gap:7px;color:var(--fn-muted);font-size:9px}.floating-note-cards article footer span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.floating-note-empty,.floating-editor-empty{height:100%;display:grid;place-content:center;justify-items:center;gap:12px;color:var(--fn-muted);text-align:center}.floating-note-empty button,.floating-editor-empty button{padding:8px 12px;border:0;border-radius:8px;color:#fff;background:#4f7df3}
 .floating-editor-panel{min-width:0;min-height:0;display:flex;flex-direction:column;background:var(--fn-surface)}.floating-editor-topline{height:48px;flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;padding:0 13px;border-bottom:1px solid var(--fn-border);color:var(--fn-muted);font-size:10px}.floating-editor-topline>div{display:flex;gap:5px}.floating-editor-topline button.danger,.floating-image-controls button.danger,.floating-context-menu button.danger{color:#d84c5a}.floating-list-toggle{display:inline-flex;align-items:center}.floating-editor-leading-actions{display:flex;align-items:center;gap:5px}.floating-editor-new-note{border-color:#4f7df3!important;color:#fff!important;background:#4f7df3!important;font-weight:700}.floating-editor-scroll{min-height:0;flex:1;overflow:auto;padding:25px clamp(22px,5vw,70px) 80px}.floating-title-input{width:100%;border:0;outline:0;color:var(--fn-text);background:transparent;font-size:clamp(25px,3vw,36px);font-weight:750}.floating-meta-row{position:relative;display:grid;grid-template-columns:minmax(230px,1.2fr) minmax(150px,.8fr) minmax(180px,1fr) auto;gap:10px;margin:15px 0}.floating-meta-row label{min-width:0;display:flex;align-items:center;gap:7px}.floating-meta-row label span{color:var(--fn-muted);font-size:10px;white-space:nowrap}.floating-meta-row input,.floating-meta-row select{min-width:0;height:33px;flex:1;padding:0 9px;border:1px solid var(--fn-border);border-radius:8px;color:var(--fn-text);background:var(--fn-soft)}.floating-note-picker{position:relative;min-width:0;display:flex;align-items:center;gap:7px}.floating-note-picker>span{color:var(--fn-muted);font-size:10px;white-space:nowrap}.floating-note-picker-trigger{min-width:0;height:40px;flex:1;display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-rows:1fr 1fr;column-gap:8px;padding:4px 8px!important;border:1px solid var(--fn-border)!important;border-radius:8px!important;color:var(--fn-text)!important;background:var(--fn-soft)!important;text-align:left}.floating-note-picker-trigger>span,.floating-note-picker-trigger>strong{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.floating-note-picker-trigger>span{color:var(--fn-muted);font-size:9px}.floating-note-picker-trigger>strong{font-size:11px}.floating-note-picker-trigger>b{grid-column:2;grid-row:1/3;align-self:center;color:var(--fn-muted);font-size:15px}.floating-note-picker-popover{position:absolute;z-index:90;top:calc(100% + 7px);left:0;width:min(420px,80vw);max-height:min(520px,65vh);display:flex;flex-direction:column;border:1px solid var(--fn-border);border-radius:12px;background:var(--fn-surface);box-shadow:0 18px 48px rgba(15,23,42,.22);overflow:hidden}.floating-note-picker-heading{height:50px;flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;padding:0 13px;border-bottom:1px solid var(--fn-border)}.floating-note-picker-heading span{color:var(--fn-muted);font-size:9px}.floating-note-tree{min-height:0;overflow:auto;padding:7px}.floating-note-tree button{width:100%;border:0;color:var(--fn-text);background:transparent;cursor:pointer;text-align:left}.floating-note-tree-folder{height:38px;display:flex;align-items:center;gap:8px;border-radius:8px!important}.floating-note-tree-folder:hover{background:var(--fn-soft)}.floating-note-tree-folder>b{width:12px;color:var(--fn-muted);font-size:17px;font-weight:400}.floating-note-tree-folder>i{width:18px;height:13px;flex:0 0 auto;border:1.5px solid;border-radius:3px}.floating-note-tree-folder>strong{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.floating-note-tree-folder>span{color:var(--fn-muted);font-size:10px}.floating-note-tree-note{height:36px;display:flex;align-items:center;gap:8px;border-radius:7px!important;color:var(--fn-muted)!important}.floating-note-tree-note:hover,.floating-note-tree-note.active{color:#386fd8!important;background:color-mix(in srgb,#4f7df3 10%,var(--fn-soft))}.floating-note-tree-note>i{font-style:normal}.floating-note-tree-note>span{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.floating-note-tree-note>time{display:none;color:var(--fn-muted);font-size:8px}
-.floating-folder-location>i{flex:0 0 auto;color:var(--fn-muted);font-size:11px;font-style:normal}.floating-folder-location select:disabled{cursor:not-allowed;opacity:.72}
+.floating-recent-picker,.floating-folder-picker{position:relative;min-width:0;display:flex;align-items:center;gap:7px}.floating-recent-trigger,.floating-folder-picker-trigger{min-width:0;flex:1;height:40px;display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-rows:1fr 1fr;padding:4px 8px;border:1px solid var(--fn-border);border-radius:8px;color:var(--fn-text);background:var(--fn-soft);text-align:left;cursor:pointer}.floating-recent-trigger span,.floating-folder-picker>span{color:var(--fn-muted);font-size:9px}.floating-recent-trigger strong,.floating-folder-picker-trigger strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px}.floating-recent-trigger b,.floating-folder-picker-trigger b{grid-column:2;grid-row:1/3;align-self:center;color:var(--fn-muted);font-size:15px}.floating-recent-popover,.floating-folder-picker-popover{position:absolute;z-index:95;top:calc(100% + 7px);left:0;width:min(360px,76vw);max-height:min(420px,60vh);display:flex;flex-direction:column;padding:7px;border:1px solid var(--fn-border);border-radius:12px;background:var(--fn-surface);box-shadow:0 18px 48px rgba(15,23,42,.22);overflow:auto}.floating-recent-heading{height:34px;display:flex;align-items:center;justify-content:space-between;padding:0 6px;color:var(--fn-text)}.floating-recent-heading span{color:var(--fn-muted);font-size:9px}.floating-recent-popover button,.floating-folder-picker-popover button{min-height:34px;display:flex;align-items:center;gap:7px;border:0;border-radius:7px;padding:0 7px;color:var(--fn-text);background:transparent;text-align:left;cursor:pointer}.floating-recent-popover button:hover,.floating-recent-popover button.active,.floating-folder-picker-popover button:hover,.floating-folder-picker-popover button.active{color:var(--fn-primary);background:color-mix(in srgb,var(--fn-primary) 10%,var(--fn-soft))}.floating-recent-popover button span,.floating-folder-picker-popover button span{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.floating-recent-popover time{color:var(--fn-muted);font-size:9px}.floating-folder-picker-popover button i{width:8px;height:8px;flex:0 0 auto;border-radius:3px}.floating-recent-popover p{padding:14px;color:var(--fn-muted);font-size:10px;text-align:center}.floating-tags-field{display:flex!important;flex-direction:column;align-items:stretch!important;gap:3px!important}.floating-tags-field small{color:var(--fn-muted);font-size:8px;font-weight:400}.floating-folder-location>i{flex:0 0 auto;color:var(--fn-muted);font-size:11px;font-style:normal}.floating-folder-location select:disabled{cursor:not-allowed;opacity:.72}
 .floating-format-toolbar{position:sticky;z-index:4;top:-25px;display:flex;align-items:center;gap:3px;margin:8px 0 14px;padding:6px;border:1px solid var(--fn-border);border-radius:10px;background:color-mix(in srgb,var(--fn-surface) 94%,transparent);backdrop-filter:blur(12px);overflow-x:auto}.floating-format-toolbar button,.floating-image-controls button{height:30px;flex:0 0 auto;padding:0 8px;border:0;border-radius:6px;color:var(--fn-muted);background:transparent;cursor:pointer}.floating-format-toolbar button:hover,.floating-image-controls button:hover{color:#386fd8;background:color-mix(in srgb,#4f7df3 10%,var(--fn-soft))}.floating-format-toolbar i,.floating-image-controls i{width:1px;height:20px;flex:0 0 auto;background:var(--fn-border)}
 .floating-content-editor{min-height:calc(100vh - 260px);outline:0;color:var(--fn-text);font-size:15px;line-height:1.78}.floating-content-editor:empty::before{color:var(--fn-muted);content:attr(data-placeholder)}.floating-content-editor h1,.floating-content-editor h2,.floating-content-editor h3{line-height:1.35}.floating-content-editor blockquote{margin:12px 0;padding:8px 34px 8px 14px;border-left:3px solid #4f7df3;color:var(--fn-muted);background:var(--fn-soft)}.floating-content-editor pre{padding:13px 36px 13px 13px;border-radius:9px;background:#121827;color:#e8edf7;white-space:pre-wrap}.floating-content-editor blockquote,.floating-content-editor pre{position:relative;min-height:42px}.floating-content-editor blockquote::after,.floating-content-editor pre::after{content:"⋮";position:absolute;top:0;right:0;bottom:0;width:25px;display:grid;place-items:center;border-left:1px solid rgba(148,163,184,.22);color:#94a3b8;font:18px/1 sans-serif;cursor:pointer;opacity:.62}.floating-content-editor blockquote:hover::after,.floating-content-editor pre:hover::after{opacity:1;background:rgba(79,125,243,.08)}.floating-content-editor blockquote:has(::selection),.floating-content-editor pre:has(::selection){outline:2px solid color-mix(in srgb,#4f7df3 55%,transparent)}.floating-content-editor>p:last-child:empty,.floating-content-editor>p:last-child:has(>br:only-child){min-height:30px;margin:8px 0;cursor:text}.floating-content-editor a{color:#386fd8}.floating-content-editor img{max-width:100%;height:auto;display:block;margin:14px auto;border-radius:8px;cursor:pointer}.floating-content-editor img[data-size="small"]{width:30%}.floating-content-editor img[data-size="medium"]{width:55%}.floating-content-editor img[data-size="large"]{width:78%}.floating-content-editor img[data-size="full"]{width:100%}.floating-content-editor img:hover{outline:2px solid color-mix(in srgb,#4f7df3 55%,transparent)}.floating-image-controls{display:flex;align-items:center;gap:3px;margin:-6px 0 10px;padding:5px 7px;border:1px solid color-mix(in srgb,#4f7df3 34%,var(--fn-border));border-radius:8px;background:var(--fn-soft)}.floating-image-controls span{margin-right:5px;color:#386fd8;font-size:10px;font-weight:700}.floating-markdown-editor{width:100%;min-height:calc(100vh - 250px);resize:none;padding:14px;border:1px solid var(--fn-border);border-radius:10px;outline:0;color:var(--fn-text);background:var(--fn-soft);font:14px/1.7 Consolas,"Microsoft YaHei",monospace}
 .floating-content-editor blockquote{margin-right:28px;padding-right:14px}.floating-content-editor pre{margin-right:28px;padding-right:13px}.floating-content-editor blockquote::after,.floating-content-editor pre::after{right:-28px;border:1px solid var(--fn-border);border-radius:0 7px 7px 0;background:var(--fn-soft)}.floating-content-editor>p:last-child:empty,.floating-content-editor>p:last-child:has(>br:only-child){min-height:34px}

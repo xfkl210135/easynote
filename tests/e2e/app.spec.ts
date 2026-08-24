@@ -208,6 +208,18 @@ test("edits and safely saves a full note inside the always-on-top companion wind
   await floating.getByLabel("切换具体笔记").click();
   await expect(floating.locator(".floating-note-picker-popover")).toBeVisible();
   await expect(floating.locator(".floating-note-tree-folder").first()).toBeVisible();
+  await floating.getByLabel("切换具体笔记").click();
+  const folderTrigger = floating.locator(".floating-folder-picker-trigger");
+  await expect(folderTrigger).toBeEnabled();
+  await folderTrigger.click();
+  const folderOption = floating.locator(".floating-folder-picker-popover > button").nth(1);
+  await expect(folderOption).toBeVisible();
+  await folderOption.click();
+  const recentTrigger = floating.getByLabel("最近编辑的笔记");
+  await recentTrigger.click();
+  await expect(floating.locator(".floating-recent-popover")).toBeVisible();
+  await expect(floating.locator(".floating-recent-popover > button").first()).toBeVisible();
+  await recentTrigger.click();
   const title = `悬浮窗口笔记-${Date.now()}`;
   await floating.locator(".floating-title-input").fill(title);
   await floating.locator(".floating-content-editor").fill("在其他网页上方完成的完整笔记正文");
