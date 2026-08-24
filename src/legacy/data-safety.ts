@@ -147,6 +147,7 @@
       this.migrationFromVersion = null;
       this.instanceId = makeId("tab");
       this.baselines = new Map();
+      this.baselineFingerprints = new Map();
       this.syncChannel = typeof BroadcastChannel === "function" ? new BroadcastChannel("easynote-sync-v1") : null;
       if (this.syncChannel) this.syncChannel.onmessage = (event) => {
         const detail = event.data || {};
@@ -157,15 +158,27 @@
 
     captureBaseline(storeName, records) {
       this.baselines.set(storeName, new Map((records || []).map((record) => [record.id, record.checksum || ""])));
+      this.baselineFingerprints.set(storeName, new Map((records || []).map((record) => [record.id, this.recordFingerprint(record)])));
     }
 
     baselineChecksum(storeName, id) { return this.baselines.get(storeName)?.get(id) || ""; }
+    baselineFingerprint(storeName, id) { return this.baselineFingerprints.get(storeName)?.get(id) || ""; }
     baselineHas(storeName, id) { return this.baselines.get(storeName)?.has(id) || false; }
+    recordFingerprint(record) {
+      if (!record || typeof record !== "object") return "";
+      const { checksum, revision, ...payload } = record;
+      return stableStringify(payload);
+    }
     updateBaseline(storeName, record) {
       if (!this.baselines.has(storeName)) this.baselines.set(storeName, new Map());
+      if (!this.baselineFingerprints.has(storeName)) this.baselineFingerprints.set(storeName, new Map());
       this.baselines.get(storeName).set(record.id, record.checksum || "");
+      this.baselineFingerprints.get(storeName).set(record.id, this.recordFingerprint(record));
     }
-    removeBaseline(storeName, id) { this.baselines.get(storeName)?.delete(id); }
+    removeBaseline(storeName, id) {
+      this.baselines.get(storeName)?.delete(id);
+      this.baselineFingerprints.get(storeName)?.delete(id);
+    }
 
     captureStateBaselines(state) {
       for (const [storeName, records] of [[STORES.notes, state?.notes], [STORES.folders, state?.categories], [STORES.files, state?.files], [STORES.tasks, state?.tasks], [STORES.taskFields, state?.taskFields], [STORES.taskViews, state?.taskViews], [STORES.scheduleEntries, state?.scheduleEntries], [STORES.scheduleSeries, state?.scheduleSeries], [STORES.scheduleOccurrenceStates, state?.scheduleOccurrenceStates], [STORES.scheduleDailyNotes, state?.scheduleDailyNotes], [STORES.whiteboards, state?.whiteboards], [STORES.focusSessions, state?.focusSessions], [STORES.reviews, state?.reviews], [STORES.goals, state?.goals], [STORES.milestones, state?.milestones]]) this.captureBaseline(storeName, records || []);
@@ -854,9 +867,14 @@
         const checksum = await sha256(stableStringify(payload));
         const previous = noteMap.get(note.id);
         const baseline = this.baselineChecksum(STORES.notes, note.id);
-        const locallyChanged = !baseline || checksum !== baseline;
-        const externalChanged = Boolean(baseline && previous?.checksum !== baseline);
-        if (externalChanged || (!previous && baseline) || (previous && !baseline && previous.checksum !== checksum)) {
+        const baselineKnown = this.baselineHas(STORES.notes, note.id), baselineFingerprint = this.baselineFingerprint(STORES.notes, note.id);
+        const locallyChanged = baseline ? checksum !== baseline : !baselineKnown || this.recordFingerprint(payload) !== baselineFingerprint;
+        const externalChanged = baseline
+          ? !previous || previous.checksum !== baseline
+          : baselineKnown
+            ? !previous || this.recordFingerprint(previous) !== baselineFingerprint
+            : Boolean(previous && previous.checksum !== checksum);
+        if (externalChanged) {
           if (!locallyChanged && previous) { preparedNotes.push(previous); continue; }
           if (!locallyChanged) continue;
           const stamp = isoNow();
@@ -876,9 +894,14 @@
         const prepared = [], changed = [];
         for (const item of items || []) {
           const clean = cleanItem(item), checksum = await sha256(stableStringify(clean)), previous = previousMap.get(item.id), baseline = this.baselineChecksum(storeName, item.id);
-          const locallyChanged = !baseline || checksum !== baseline;
-          const externalChanged = Boolean(baseline && previous?.checksum !== baseline);
-          if (externalChanged || (!previous && baseline) || (previous && !baseline && previous.checksum !== checksum)) {
+          const baselineKnown = this.baselineHas(storeName, item.id), baselineFingerprint = this.baselineFingerprint(storeName, item.id);
+          const locallyChanged = baseline ? checksum !== baseline : !baselineKnown || this.recordFingerprint(clean) !== baselineFingerprint;
+          const externalChanged = baseline
+            ? !previous || previous.checksum !== baseline
+            : baselineKnown
+              ? !previous || this.recordFingerprint(previous) !== baselineFingerprint
+              : Boolean(previous && previous.checksum !== checksum);
+          if (externalChanged) {
             if (locallyChanged) conflicts.push({ kind, id: item.id, label: clean.name || item.id, local: clean, remote: previous || null });
             if (previous) prepared.push(previous);
             continue;
@@ -896,9 +919,14 @@
         const prepared = [], changed = [];
         for (const item of items || []) {
           const clean = cleanItem(item), checksum = await sha256(stableStringify(clean)), previous = previousMap.get(item.id), baseline = this.baselineChecksum(storeName, item.id);
-          const locallyChanged = !baseline || checksum !== baseline;
-          const externalChanged = Boolean(baseline && previous?.checksum !== baseline);
-          if (externalChanged || (!previous && baseline) || (previous && !baseline && previous.checksum !== checksum)) {
+          const baselineKnown = this.baselineHas(storeName, item.id), baselineFingerprint = this.baselineFingerprint(storeName, item.id);
+          const locallyChanged = baseline ? checksum !== baseline : !baselineKnown || this.recordFingerprint(clean) !== baselineFingerprint;
+          const externalChanged = baseline
+            ? !previous || previous.checksum !== baseline
+            : baselineKnown
+              ? !previous || this.recordFingerprint(previous) !== baselineFingerprint
+              : Boolean(previous && previous.checksum !== checksum);
+          if (externalChanged) {
             if (locallyChanged) conflicts.push({ kind, id: item.id, label: clean.title || clean.name || item.id, local: clean, remote: previous || null });
             if (previous) prepared.push(previous);
             continue;
@@ -947,7 +975,7 @@
         recurrenceInterval: Math.max(1, Number(series.recurrenceInterval) || 1), weekdays: Array.isArray(series.weekdays) ? [...new Set(series.weekdays.map(Number).filter((day) => day >= 0 && day <= 6))].sort() : [],
         dayOfMonth: Math.min(31, Math.max(1, Number(series.dayOfMonth) || 1)), until: series.until || "", active: series.active !== false,
         createdAt: series.createdAt || isoNow(), updatedAt: series.updatedAt || isoNow()
-      }));
+      }), STORES.scheduleSeries, "scheduleSeries");
       const scheduleOccurrenceResult = await prepareVersioned(snapshot.scheduleOccurrenceStates, scheduleOccurrenceMap, (occurrence) => ({
         id: occurrence.id, seriesId: occurrence.seriesId || "", date: occurrence.date || "", completed: Boolean(occurrence.completed), deleted: Boolean(occurrence.deleted),
         override: occurrence.override && typeof occurrence.override === "object" ? occurrence.override : {}, updatedAt: occurrence.updatedAt || isoNow()
@@ -1052,8 +1080,12 @@
         await this.maybeCreateTaskHistory(taskResult.changed, fieldResult.changed, reason);
         for (const conflict of conflicts.filter((item) => item.kind !== "note")) await this.recordRecovery("multi-tab-conflict", `多页面冲突：${conflict.label || conflict.id}`, { kind: conflict.kind, local: conflict.local, remote: conflict.remote });
         for (const [storeName, records] of [[STORES.notes, changedNotes], [STORES.folders, folderResult.changed], [STORES.files, fileResult.changed], [STORES.tasks, taskResult.changed], [STORES.taskFields, fieldResult.changed], [STORES.taskViews, viewResult.changed], [STORES.scheduleEntries, scheduleResult.changed], [STORES.scheduleSeries, scheduleSeriesResult.changed], [STORES.scheduleOccurrenceStates, scheduleOccurrenceResult.changed], [STORES.scheduleDailyNotes, scheduleDailyNoteResult.changed], [STORES.whiteboards, whiteboardResult.changed], [STORES.focusSessions, focusResult.changed], [STORES.reviews, reviewResult.changed], [STORES.goals, goalResult.changed], [STORES.milestones, milestoneResult.changed]]) records.forEach((record) => this.updateBaseline(storeName, record));
+        const conflictStores = { note: STORES.notes, folder: STORES.folders, file: STORES.files, task: STORES.tasks, taskField: STORES.taskFields, taskView: STORES.taskViews, schedule: STORES.scheduleEntries, scheduleSeries: STORES.scheduleSeries, scheduleOccurrence: STORES.scheduleOccurrenceStates, scheduleDailyNote: STORES.scheduleDailyNotes, whiteboard: STORES.whiteboards, focusSession: STORES.focusSessions, review: STORES.reviews, goal: STORES.goals, milestone: STORES.milestones };
         for (const conflict of conflicts) {
-          if (conflict.kind === "note" && conflict.remote) this.updateBaseline(STORES.notes, conflict.remote);
+          const storeName = conflictStores[conflict.kind];
+          if (!storeName) continue;
+          if (conflict.remote) this.updateBaseline(storeName, conflict.remote);
+          else this.removeBaseline(storeName, conflict.originalId || conflict.id);
         }
         for (const [storeName, existing, nextIds] of [[STORES.notes, existingNotes, nextNoteIds], [STORES.folders, existingFolders, nextFolderIds], [STORES.files, existingFiles, nextFileIds], [STORES.tasks, existingTasks, nextTaskIds], [STORES.taskFields, existingTaskFields, nextTaskFieldIds], [STORES.taskViews, existingTaskViews, nextTaskViewIds], [STORES.scheduleEntries, existingScheduleEntries, nextScheduleIds], [STORES.scheduleSeries, existingScheduleSeries, nextScheduleSeriesIds], [STORES.scheduleOccurrenceStates, existingScheduleOccurrenceStates, nextScheduleOccurrenceIds], [STORES.scheduleDailyNotes, existingScheduleDailyNotes, nextScheduleDailyNoteIds], [STORES.whiteboards, existingWhiteboards, nextWhiteboardIds], [STORES.focusSessions, existingFocusSessions, nextFocusIds], [STORES.reviews, existingReviews, nextReviewIds], [STORES.goals, existingGoals, nextGoalIds], [STORES.milestones, existingMilestones, nextMilestoneIds]]) existing.forEach((record) => { if (!nextIds.has(record.id) && this.baselineHas(storeName, record.id)) this.removeBaseline(storeName, record.id); });
         this.lastError = null;
@@ -1095,7 +1127,7 @@
           this.emitStatus(this.pendingSnapshot ? "dirty" : "saved", { verifiedAt: result.committedAt, conflicts: result.conflicts?.length || 0 });
           if (result.conflicts?.length) window.dispatchEvent(new CustomEvent("easynote:sync-conflict", { detail: { conflicts: result.conflicts } }));
           if (result.totalChanges || result.conflicts?.length || result.reason === "danger") this.broadcastCommit(result);
-          waiters.forEach((resolve) => resolve(true));
+          waiters.forEach((resolve) => resolve(!result.conflicts?.length));
         } catch (error) {
           console.error("EasyNote verified save failed", error);
           this.lastError = error;

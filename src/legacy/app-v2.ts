@@ -9,6 +9,7 @@ import { codeSourceFromBlock, editMermaidDiagram, hydrateMermaidDiagrams, mermai
 
   const LEGACY_STORAGE_KEY = "easynote-data-v1";
   const THEME_KEY = "easynote-theme";
+  const THEME_LABELS = Object.freeze({ light: "A · 云雾蓝", warm: "B · 奶油暖杏", mint: "C · 薄荷青黛", purple: "D · 暮光紫灰", rose: "E · 樱雾玫瑰", dark: "F · 深海夜蓝", ice: "G · 冰川冷白" });
   const LAYOUT_KEY = "easynote-layout-v1";
   const INSTALLATION_MARKER_KEY = "easynote-has-saved-user-data";
   const APP_BUILD = "2026-08-21-storage-recovery-2";
@@ -29,7 +30,7 @@ import { codeSourceFromBlock, editMermaidDiagram, hydrateMermaidDiagrams, mermai
     topbar: $(".topbar"), workspace: $("#workspace"), sidebar: $("#sidebar"), notePanel: $("#notePanel"),
     editorPanel: $("#editorPanel"), sidebarResizer: $("#sidebarResizer"), listResizer: $("#listResizer"),
     sidebarScrim: $("#sidebarScrim"), sidebarToggle: $("#sidebarToggle"), searchInput: $("#searchInput"),
-    themeToggle: $("#themeToggle"), saveIndicator: $("#saveIndicator"), newNoteTop: $("#newNoteTop"),
+    themeToggle: $("#themeToggle"), themePopover: $("#themePopover"), saveIndicator: $("#saveIndicator"), newNoteTop: $("#newNoteTop"),
     newNoteEmpty: $("#newNoteEmpty"), allCount: $("#allCount"), favoriteCount: $("#favoriteCount"),
     trashCount: $("#trashCount"), categoryList: $("#categoryList"), addCategory: $("#addCategory"),
     viewTitle: $("#viewTitle"), viewCount: $("#viewCount"), sortSelect: $("#sortSelect"), noteList: $("#noteList"),
@@ -40,6 +41,7 @@ import { codeSourceFromBlock, editMermaidDiagram, hydrateMermaidDiagrams, mermai
     trashActions: $("#trashActions"), restoreButton: $("#restoreButton"), permanentDeleteButton: $("#permanentDeleteButton"),
     importButton: $("#importButton"), exportButton: $("#exportButton"), importFile: $("#importFile"),
     imageFile: $("#imageFile"), insertImage: $("#insertImage"), insertLink: $("#insertLink"), clearFormat: $("#clearFormat"),
+    fontFamilySelect: $("#fontFamilySelect"), fontSizeSelect: $("#fontSizeSelect"), formatPainterButton: $("#formatPainterButton"),
     backToList: $("#backToList"), editorMore: $("#editorMore"), imageDropHint: $("#imageDropHint"),
     imageResizeOverlay: $("#imageResizeOverlay"), imageResizeHandle: $("#imageResizeHandle"), imageWidthHandle: $("#imageWidthHandle"), imageHeightHandle: $("#imageHeightHandle"), imageSizeLabel: $("#imageSizeLabel"),
     splitViewButton: $("#splitViewButton"), outlineButton: $("#outlineButton"), editorSplitResizer: $("#editorSplitResizer"),
@@ -89,6 +91,7 @@ import { codeSourceFromBlock, editMermaidDiagram, hydrateMermaidDiagrams, mermai
   let saveTimer = null;
   let toastTimer = null;
   let savedEditorRange = null;
+  let formatPainter = null;
   let contextPayload = null;
   let dragDepth = 0;
   let layout = loadLayout();
@@ -100,6 +103,22 @@ import { codeSourceFromBlock, editMermaidDiagram, hydrateMermaidDiagrams, mermai
   let taskManager = null;
   let scheduleManager = null;
   let whiteboardManager = null;
+
+  function applyTheme(value, persistChoice = false, announce = false) {
+    const theme = Object.prototype.hasOwnProperty.call(THEME_LABELS, value) ? value : "light";
+    document.documentElement.dataset.theme = theme;
+    $$('[data-theme-option]').forEach((button) => {
+      const active = button.dataset.themeOption === theme;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-checked", String(active));
+    });
+    const label = THEME_LABELS[theme];
+    els.themeToggle.setAttribute("aria-label", `当前色调：${label}，点击选择其他色调`);
+    els.themeToggle.title = `界面色调：${label}`;
+    if (persistChoice) localStorage.setItem(THEME_KEY, theme);
+    if (announce) showToast(`已切换为${label}`);
+    return theme;
+  }
 
   function seedData() {
     const stamp = Date.now();
@@ -306,6 +325,17 @@ import { codeSourceFromBlock, editMermaidDiagram, hydrateMermaidDiagrams, mermai
       if (index >= 0) conflict.remote ? state.notes.splice(index, 1, conflict.remote) : state.notes.splice(index, 1);
       if (!state.notes.some((note) => note.id === conflict.copy.id)) state.notes.unshift(conflict.copy);
       if (activeNoteId === conflict.originalId) activeNoteId = conflict.copy.id;
+    }
+    const conflictCollections = { folder: "categories", file: "files", task: "tasks", taskField: "taskFields", taskView: "taskViews", schedule: "scheduleEntries", scheduleSeries: "scheduleSeries", scheduleOccurrence: "scheduleOccurrenceStates", scheduleDailyNote: "scheduleDailyNotes", whiteboard: "whiteboards", focusSession: "focusSessions", review: "reviews", goal: "goals", milestone: "milestones" };
+    for (const conflict of conflicts.filter((item) => item.kind !== "note")) {
+      const key = conflictCollections[conflict.kind];
+      const records = key ? state[key] : null;
+      if (!Array.isArray(records)) continue;
+      const index = records.findIndex((record) => record.id === conflict.id);
+      if (conflict.remote) {
+        if (index >= 0) records.splice(index, 1, conflict.remote);
+        else records.push(conflict.remote);
+      } else if (index >= 0) records.splice(index, 1);
     }
     render();
     showToast(conflicts.some((item) => item.kind === "note") ? "检测到同一笔记被多个页面修改，本页内容已保存为冲突副本" : "检测到多页面修改冲突，本页版本已放入数据安全恢复记录");
@@ -1414,6 +1444,101 @@ import { codeSourceFromBlock, editMermaidDiagram, hydrateMermaidDiagrams, mermai
   }
   function commitEditor() { normalizeRichImageStructure(els.contentEditor); captureEditorRange(); updateActiveNote({ content: getCleanPrimaryHtml() }); if (outlinePane === "primary") updateOutline(); }
   function runEditorCommand(command, value = null) { restoreEditorRange(); document.execCommand(command, false, value); commitEditor(); }
+  function selectedTextSlices(range) {
+    const slices = [];
+    const walker = document.createTreeWalker(els.contentEditor, NodeFilter.SHOW_TEXT);
+    let node = walker.nextNode();
+    while (node) {
+      let intersects = false;
+      try { intersects = range.intersectsNode(node); } catch { intersects = false; }
+      if (intersects) {
+        const start = node === range.startContainer ? range.startOffset : 0;
+        const end = node === range.endContainer ? range.endOffset : node.data.length;
+        if (end > start) slices.push({ node, start, end });
+      }
+      node = walker.nextNode();
+    }
+    return slices;
+  }
+  function applyInlineStyleToSelection(style) {
+    restoreEditorRange();
+    const selection = window.getSelection();
+    if (!selection?.rangeCount || selection.getRangeAt(0).collapsed) return false;
+    const range = selection.getRangeAt(0).cloneRange();
+    const slices = selectedTextSlices(range);
+    if (!slices.length) return false;
+    const wrappers = [];
+    [...slices].reverse().forEach(({ node, start, end }) => {
+      const part = document.createRange();
+      part.setStart(node, start); part.setEnd(node, end);
+      const span = document.createElement("span");
+      Object.assign(span.style, style);
+      part.surroundContents(span);
+      wrappers.unshift(span);
+    });
+    const appliedRange = document.createRange();
+    appliedRange.setStartBefore(wrappers[0]);
+    appliedRange.setEndAfter(wrappers[wrappers.length - 1]);
+    selection.removeAllRanges(); selection.addRange(appliedRange); saveCurrentRange(appliedRange);
+    commitEditor();
+    return true;
+  }
+  function effectiveBackgroundColor(element) {
+    let current = element;
+    while (current && current !== els.contentEditor) {
+      const color = getComputedStyle(current).backgroundColor;
+      if (color && color !== "transparent" && color !== "rgba(0, 0, 0, 0)") return color;
+      current = current.parentElement;
+    }
+    return "";
+  }
+  function setFormatPainterActive(active) {
+    els.formatPainterButton.classList.toggle("active", active);
+    els.formatPainterButton.setAttribute("aria-pressed", String(active));
+    els.formatPainterButton.title = active ? "格式已复制：选择目标文字即可应用，按 Esc 取消" : "先选中示例文字，再点击格式刷，然后选择目标文字";
+  }
+  function cancelFormatPainter() { formatPainter = null; setFormatPainterActive(false); }
+  function captureFormatPainter() {
+    if (formatPainter) { cancelFormatPainter(); showToast("已取消格式刷"); return; }
+    restoreEditorRange();
+    const selection = window.getSelection();
+    if (!selection?.rangeCount) return;
+    const range = selection.getRangeAt(0);
+    const firstSelectedText = range.collapsed ? null : selectedTextSlices(range)[0]?.node;
+    const sourceNode = firstSelectedText || range.startContainer;
+    const start = sourceNode.nodeType === Node.ELEMENT_NODE ? sourceNode : sourceNode.parentElement;
+    const element = start?.closest?.("#contentEditor *") || (start === els.contentEditor ? els.contentEditor : null);
+    if (!element) { showToast("请先把光标放在要复制格式的文字中"); return; }
+    const computedStyle = getComputedStyle(element);
+    const backgroundColor = effectiveBackgroundColor(element);
+    const block = element.closest("p,h1,h2,h3,blockquote,pre");
+    formatPainter = {
+      style: {
+        fontFamily: computedStyle.fontFamily,
+        fontSize: computedStyle.fontSize,
+        fontWeight: computedStyle.fontWeight,
+        fontStyle: computedStyle.fontStyle,
+        textDecorationLine: computedStyle.textDecorationLine,
+        color: computedStyle.color,
+        ...(backgroundColor ? { backgroundColor } : {}),
+      },
+      blockTag: block?.tagName?.toLowerCase() || "",
+    };
+    setFormatPainterActive(true);
+    showToast("格式已复制，请选择要应用的文字");
+  }
+  function applyFormatPainter() {
+    if (!formatPainter || !savedEditorRange || savedEditorRange.collapsed) return false;
+    const copied = formatPainter;
+    if (copied.blockTag) {
+      restoreEditorRange();
+      document.execCommand("formatBlock", false, copied.blockTag);
+      captureEditorRange();
+    }
+    const applied = applyInlineStyleToSelection(copied.style);
+    if (applied) { cancelFormatPainter(); showToast("格式已应用"); }
+    return applied;
+  }
   function insertEditorHtml(html) { restoreEditorRange(); document.execCommand("insertHTML", false, html); commitEditor(); }
   async function insertLinkAtSelection() {
     const url = await showInputDialog({ title: "插入链接", label: "链接地址", type: "url", placeholder: "https://example.com", validate: (value) => /^https?:\/\//i.test(value) ? "" : "请输入以 http:// 或 https:// 开头的地址" });
@@ -1647,6 +1772,15 @@ import { codeSourceFromBlock, editMermaidDiagram, hydrateMermaidDiagrams, mermai
     } else if (payload?.scheduleEntry) {
       const restored = { ...payload.scheduleEntry, updatedAt: now() }, index = state.scheduleEntries.findIndex((item) => item.id === restored.id);
       if (index >= 0) state.scheduleEntries[index] = restored; else state.scheduleEntries.push(restored);
+    } else if (payload?.local && typeof payload.local === "object") {
+      const recoveryKind = payload.kind || (payload.local.startDate && payload.local.recurrenceType ? "scheduleSeries" : "");
+      const conflictCollections = { folder: "categories", file: "files", task: "tasks", taskField: "taskFields", taskView: "taskViews", schedule: "scheduleEntries", scheduleSeries: "scheduleSeries", scheduleOccurrence: "scheduleOccurrenceStates", scheduleDailyNote: "scheduleDailyNotes", whiteboard: "whiteboards", focusSession: "focusSessions", review: "reviews", goal: "goals", milestone: "milestones" };
+      const key = conflictCollections[recoveryKind], records = key ? state[key] : null;
+      if (!Array.isArray(records)) return showToast("这条冲突记录的类型无法自动识别，请先导出诊断信息并保留恢复记录");
+      const restored = structuredClone(payload.local);
+      if (Object.prototype.hasOwnProperty.call(restored, "updatedAt")) restored.updatedAt = now();
+      const index = records.findIndex((item) => item.id === restored.id);
+      if (index >= 0) records.splice(index, 1, restored); else records.push(restored);
     } else if (payload?.whiteboard) {
       const restored = { ...payload.whiteboard, updatedAt: now() }, index = state.whiteboards.findIndex((item) => item.id === restored.id);
       if (index >= 0) state.whiteboards[index] = restored; else state.whiteboards.push(restored);
@@ -1657,7 +1791,8 @@ import { codeSourceFromBlock, editMermaidDiagram, hydrateMermaidDiagrams, mermai
       const restored = { ...payload, deletedAt: null, updatedAt: now() }; const index = state.notes.findIndex((item) => item.id === restored.id); if (index >= 0) state.notes[index] = restored; else state.notes.unshift(restored);
     }
     activeView = "all"; activeNoteId = state.notes.find((item) => !item.deletedAt)?.id || null;
-    await persist(true, "manual"); taskManager?.render(); scheduleManager?.render(); whiteboardManager?.setState(state); render(); await updateSafetyCenter(); showToast("数据已恢复并通过保存校验");
+    if (!await persist(true, "manual")) return showToast("恢复内容尚未写入数据库，请保留当前页面并重试");
+    taskManager?.render(); scheduleManager?.render(); whiteboardManager?.setState(state); render(); await updateSafetyCenter(); showToast("数据已恢复并通过保存校验");
   }
 
   function showToast(message) {
@@ -1969,15 +2104,35 @@ import { codeSourceFromBlock, editMermaidDiagram, hydrateMermaidDiagrams, mermai
       if (event.button !== 0 || !event.target.matches("img")) return;
       selectImageForResize(event.target); startImageMove(event);
     });
+    els.contentEditor.addEventListener("mouseup", () => {
+      if (!formatPainter) return;
+      setTimeout(() => { captureEditorRange(); applyFormatPainter(); }, 0);
+    });
+    els.contentEditor.addEventListener("touchend", () => {
+      if (!formatPainter) return;
+      setTimeout(() => { captureEditorRange(); applyFormatPainter(); }, 0);
+    }, { passive: true });
     els.markdownEditor.addEventListener("input", () => updateActiveNote({ content: markdownToHtml(els.markdownEditor.value) }, true));
     document.addEventListener("selectionchange", () => { const selection = window.getSelection(); if (selection?.rangeCount && els.contentEditor.contains(selection.anchorNode)) saveCurrentRange(selection.getRangeAt(0)); });
+    document.addEventListener("keydown", (event) => { if (event.key === "Escape" && formatPainter) { cancelFormatPainter(); showToast("已取消格式刷"); } });
 
-    els.modeToggle.addEventListener("click", () => { deselectImage(); editMode = editMode === "rich" ? "markdown" : "rich"; setEditorMode(true); updateActiveNote({ content: editMode === "markdown" ? markdownToHtml(els.markdownEditor.value) : getCleanPrimaryHtml() }); updateOutline(); });
+    els.modeToggle.addEventListener("click", () => { deselectImage(); cancelFormatPainter(); editMode = editMode === "rich" ? "markdown" : "rich"; setEditorMode(true); updateActiveNote({ content: editMode === "markdown" ? markdownToHtml(els.markdownEditor.value) : getCleanPrimaryHtml() }); updateOutline(); });
     els.favoriteButton.addEventListener("click", () => toggleFavorite(activeNoteId));
     els.deleteButton.addEventListener("click", () => moveToTrash()); els.restoreButton.addEventListener("click", () => restoreNote()); els.permanentDeleteButton.addEventListener("click", () => permanentlyDelete());
     els.downloadMarkdown.addEventListener("click", () => exportNoteMarkdown());
-    els.formatToolbar.addEventListener("mousedown", (event) => event.preventDefault());
+    els.formatToolbar.addEventListener("mousedown", (event) => { if (event.target.closest?.("button")) event.preventDefault(); });
     els.formatToolbar.addEventListener("click", (event) => { const button = event.target.closest("button[data-command]"); if (button) runEditorCommand(button.dataset.command, button.dataset.value || null); });
+    els.fontFamilySelect.addEventListener("change", () => {
+      const value = els.fontFamilySelect.value;
+      if (value && !applyInlineStyleToSelection({ fontFamily: value })) showToast("请先选择要调整字体的文字");
+      els.fontFamilySelect.value = "";
+    });
+    els.fontSizeSelect.addEventListener("change", () => {
+      const value = els.fontSizeSelect.value;
+      if (value && !applyInlineStyleToSelection({ fontSize: value })) showToast("请先选择要调整字号的文字");
+      els.fontSizeSelect.value = "";
+    });
+    els.formatPainterButton.addEventListener("click", captureFormatPainter);
     els.insertLink.addEventListener("click", insertLinkAtSelection); els.clearFormat.addEventListener("click", () => runEditorCommand("removeFormat")); els.insertImage.addEventListener("click", () => { captureEditorRange(); els.imageFile.click(); });
 
     els.imageFile.addEventListener("change", () => { if (els.imageFile.files.length) insertImageFiles(els.imageFile.files); els.imageFile.value = ""; });
@@ -2029,10 +2184,22 @@ import { codeSourceFromBlock, editMermaidDiagram, hydrateMermaidDiagrams, mermai
 
     els.exportButton.addEventListener("click", exportData); els.importButton.addEventListener("click", () => els.importFile.click());
     els.importFile.addEventListener("change", () => { if (els.importFile.files[0]) importData(els.importFile.files[0]); els.importFile.value = ""; els.importFile.accept = "application/json,text/markdown,.json,.md,.markdown"; });
-    els.themeToggle.addEventListener("click", () => { const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark"; document.documentElement.dataset.theme = next; localStorage.setItem(THEME_KEY, next); });
+    els.themeToggle.addEventListener("click", (event) => {
+      event.stopPropagation();
+      els.layoutPopover.hidden = true;
+      els.themePopover.hidden = !els.themePopover.hidden;
+      els.themeToggle.setAttribute("aria-expanded", String(!els.themePopover.hidden));
+    });
+    els.themePopover.addEventListener("click", (event) => {
+      const option = event.target.closest("[data-theme-option]");
+      if (!option) return;
+      applyTheme(option.dataset.themeOption, true, true);
+      els.themePopover.hidden = true;
+      els.themeToggle.setAttribute("aria-expanded", "false");
+    });
     els.sidebarToggle.addEventListener("click", () => { els.sidebar.classList.add("open"); els.sidebarScrim.classList.add("open"); }); els.sidebarScrim.addEventListener("click", closeSidebar); els.backToList.addEventListener("click", () => els.workspace.classList.remove("editor-open"));
 
-    els.layoutButton.addEventListener("click", (event) => { event.stopPropagation(); els.layoutPopover.hidden = !els.layoutPopover.hidden; });
+    els.layoutButton.addEventListener("click", (event) => { event.stopPropagation(); els.themePopover.hidden = true; els.themeToggle.setAttribute("aria-expanded", "false"); els.layoutPopover.hidden = !els.layoutPopover.hidden; });
     els.panelSwitcher.addEventListener("click", (event) => { const button = event.target.closest("[data-panel-switch]"); if (button) togglePanel(button.dataset.panelSwitch); });
     els.layoutPopover.addEventListener("click", (event) => { const panel = event.target.closest("[data-layout-panel]"); const action = event.target.closest("[data-layout-action]"); if (panel) togglePanel(panel.dataset.layoutPanel); if (action?.dataset.layoutAction === "focus") enterFocusMode(); if (action?.dataset.layoutAction === "reset") resetLayout(); });
     els.focusExit.addEventListener("click", exitFocusMode);
@@ -2083,6 +2250,7 @@ import { codeSourceFromBlock, editMermaidDiagram, hydrateMermaidDiagrams, mermai
     document.addEventListener("contextmenu", (event) => { const taskRange = event.target.matches?.("[data-progress-task]"); if (event.shiftKey || (!taskRange && (event.target.closest("select") || (event.target.closest("input,textarea") && !event.target.matches("[data-context='meta-input']"))))) return; const result = contextForTarget(event.target); if (!result) return; event.preventDefault(); openContextMenu(event.clientX, event.clientY, result.items, result.payload); });
     document.addEventListener("click", (event) => {
       if (!event.target.closest("#layoutPopover,#layoutButton")) els.layoutPopover.hidden = true;
+      if (!event.target.closest("#themePopover,#themeToggle")) { els.themePopover.hidden = true; els.themeToggle.setAttribute("aria-expanded", "false"); }
       const more = event.target.closest("[data-more]");
       if (more) {
         event.preventDefault(); event.stopPropagation(); const rect = more.getBoundingClientRect();
@@ -2099,7 +2267,7 @@ import { codeSourceFromBlock, editMermaidDiagram, hydrateMermaidDiagrams, mermai
     document.addEventListener("scroll", closeContextMenu, true);
     document.addEventListener("keydown", async (event) => {
       if (event.key === "Escape" && dialogState) { event.preventDefault(); finishDialog(dialogState.mode === "confirm" ? false : null); return; }
-      if (event.key === "Escape") { if (activeLinkUrl) { event.preventDefault(); hideLinkViewer(); return; } closeContextMenu(); els.layoutPopover.hidden = true; if (layout.focus) exitFocusMode(); }
+      if (event.key === "Escape") { if (activeLinkUrl) { event.preventDefault(); hideLinkViewer(); return; } closeContextMenu(); els.layoutPopover.hidden = true; els.themePopover.hidden = true; els.themeToggle.setAttribute("aria-expanded", "false"); if (layout.focus) exitFocusMode(); }
       if (!(event.ctrlKey || event.metaKey)) return;
       if (whiteboardManager?.active && event.key.toLowerCase() === "z") { event.preventDefault(); event.shiftKey ? whiteboardManager.redo() : whiteboardManager.undo(); return; }
       if (whiteboardManager?.active && event.key.toLowerCase() === "y") { event.preventDefault(); whiteboardManager.redo(); return; }
@@ -2115,8 +2283,7 @@ import { codeSourceFromBlock, editMermaidDiagram, hydrateMermaidDiagrams, mermai
   }
 
   async function init() {
-    const preferredTheme = localStorage.getItem(THEME_KEY) || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
-    document.documentElement.dataset.theme = preferredTheme;
+    applyTheme(localStorage.getItem(THEME_KEY) || "light");
     state = await loadData();
     if (safety.restoredFromFailedSave) setStartupStatus("已找回上次保存失败时的修改，正在执行最终完整性检查…");
     else if (safety.restoredFromRescue) setStartupStatus("已从自动救援快照恢复数据，正在执行最终完整性检查…");

@@ -27,6 +27,69 @@ test("loads the existing desktop experience", async ({ page }, testInfo) => {
   }
 });
 
+test("switches and persists all seven interface color themes", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop-chromium", "theme persistence regression runs once on desktop");
+  const themes = [
+    ["light", "#3976f6"], ["warm", "#b65f35"], ["mint", "#168874"], ["purple", "#7656c9"],
+    ["rose", "#c45c7a"], ["dark", "#6c9aff"], ["ice", "#2795cc"],
+  ] as const;
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  await page.locator("#themeToggle").click();
+  await expect(page.locator("#themePopover [data-theme-option]")).toHaveCount(7);
+
+  for (const [theme, primary] of themes) {
+    if (await page.locator("#themePopover").isHidden()) await page.locator("#themeToggle").click();
+    const option = page.locator(`[data-theme-option="${theme}"]`);
+    await option.click();
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    await expect(option).toHaveAttribute("aria-checked", "true");
+    await expect.poll(() => page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--primary").trim())).toBe(primary);
+    expect(await page.evaluate(() => localStorage.getItem("easynote-theme"))).toBe(theme);
+  }
+
+  await page.reload();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "ice");
+  await page.locator("#themeToggle").click();
+  await expect(page.locator('[data-theme-option="ice"]')).toHaveClass(/active/);
+});
+
+test("applies font, size and one-shot format painter in the rich-text editor", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop-chromium", "rich-text toolbar regression runs once on desktop");
+  await page.locator("#newNoteTop").click();
+  const editor = page.locator("#contentEditor");
+  await editor.evaluate((element) => {
+    element.innerHTML = '<p><span id="format-source">格式来源</span> 与 <span id="format-target">格式目标</span></p>';
+    element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText" }));
+  });
+  const selectContents = async (selector: string) => page.locator(selector).evaluate((element) => {
+    const range = document.createRange(); range.selectNodeContents(element);
+    const selection = window.getSelection()!; selection.removeAllRanges(); selection.addRange(range);
+    document.dispatchEvent(new Event("selectionchange"));
+  });
+  const selectedTextStyle = (selector: string) => page.locator(selector).evaluate((element) => {
+    let leaf: Element = element;
+    while (leaf.firstElementChild) leaf = leaf.firstElementChild;
+    const style = getComputedStyle(leaf as HTMLElement);
+    return { family: style.fontFamily, size: style.fontSize, weight: style.fontWeight };
+  });
+
+  await selectContents("#format-source");
+  await page.locator("#fontFamilySelect").selectOption("SimHei, sans-serif");
+  await page.locator("#fontSizeSelect").selectOption("24px");
+  await page.locator('#formatToolbar button[data-command="bold"]').click();
+  await expect.poll(() => selectedTextStyle("#format-source")).toMatchObject({ size: "24px", weight: "700" });
+  expect((await selectedTextStyle("#format-source")).family).toContain("SimHei");
+
+  await selectContents("#format-source");
+  await page.locator("#formatPainterButton").click();
+  await expect(page.locator("#formatPainterButton")).toHaveClass(/active/);
+  await selectContents("#format-target");
+  await editor.dispatchEvent("mouseup");
+  await expect(page.locator("#formatPainterButton")).not.toHaveClass(/active/);
+  await expect.poll(() => selectedTextStyle("#format-target")).toMatchObject({ size: "24px", weight: "700" });
+  expect((await selectedTextStyle("#format-target")).family).toContain("SimHei");
+});
+
 test("inserts editable Mermaid source before rendering in both note editors", async ({ page, context }, testInfo) => {
   test.skip(testInfo.project.name !== "desktop-chromium", "Mermaid context-menu workflow runs once on desktop");
 
@@ -416,6 +479,22 @@ test("persists weekly schedules, reviews, goals and milestones", async ({ page }
   const seriesCard = page.locator(".series-card", { hasText: "每周规划回归" });
   await expect(seriesCard).toContainText("09:15–10:45");
   await seriesCard.click({ button: "right" });
+  await page.locator(".schedule-context-menu").getByRole("menuitem", { name: "编辑固定日程" }).click();
+  modal = page.locator(".productivity-modal");
+  await modal.getByRole("button", { name: "添加时间段" }).click();
+  const editedTimeInputs = modal.locator('input[type="time"]');
+  await editedTimeInputs.nth(2).fill("14:00");
+  await editedTimeInputs.nth(3).fill("15:00");
+  await modal.evaluate((form: HTMLFormElement) => form.requestSubmit());
+  await expect(modal).toBeHidden();
+  await expect(seriesCard).toContainText("14:00–15:00");
+  await page.getByRole("link", { name: "总日程", exact: true }).click();
+  await page.getByRole("button", { name: "列表", exact: true }).click();
+  const recurringListCards = page.locator(".productivity-schedule-card", { hasText: "每周规划回归" });
+  await expect(recurringListCards.first()).toBeVisible();
+  expect(await recurringListCards.count()).toBeGreaterThan(0);
+  await page.getByRole("link", { name: "固定日程", exact: true }).click();
+  await seriesCard.click({ button: "right" });
   await expect(page.locator(".schedule-context-menu")).toContainText("复制固定日程");
   await page.locator(".schedule-context-menu").getByRole("menuitem", { name: "暂停固定日程" }).click();
   await expect(seriesCard).toHaveClass(/paused/);
@@ -450,7 +529,9 @@ test("persists weekly schedules, reviews, goals and milestones", async ({ page }
   await page.getByRole("link", { name: "复盘" }).click();
   await expect(page.locator(".review-history > button")).toHaveCount(1);
   await page.getByRole("link", { name: "固定日程" }).click();
-  await expect(page.locator(".series-card", { hasText: "每周规划回归" })).toHaveCount(1);
+  const reloadedSeries = page.locator(".series-card", { hasText: "每周规划回归" });
+  await expect(reloadedSeries).toHaveCount(1);
+  await expect(reloadedSeries).toContainText("14:00–15:00");
 });
 
 test("opens task, note and web links from a schedule", async ({ page }, testInfo) => {
@@ -548,11 +629,15 @@ test("schedule scrolling, timeline and custom quotes stay usable", async ({ page
   await expect(saveReview).toBeVisible();
 
   await page.getByRole("link", { name: "总日程", exact: true }).click();
+  await expect(page.locator(".month-calendar-day")).toHaveCount(42);
+  await expect(page.locator(".month-calendar-event", { hasText: "时间线回归安排" })).toBeVisible();
+  await page.getByRole("button", { name: "列表", exact: true }).click();
   let totalCard = page.locator(".productivity-schedule-card", { hasText: "时间线回归安排" });
   await totalCard.getByRole("button", { name: "标记完成", exact: true }).click();
   await expect(totalCard).toHaveClass(/done/);
   await page.reload();
   await expect(page).toHaveURL(/#\/schedule\/all$/);
+  await page.getByRole("button", { name: "列表", exact: true }).click();
   totalCard = page.locator(".productivity-schedule-card", { hasText: "时间线回归安排" });
   await expect(totalCard).toHaveClass(/done/);
   await totalCard.getByRole("button", { name: "重新打开", exact: true }).click();

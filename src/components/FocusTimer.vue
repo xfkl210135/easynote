@@ -43,37 +43,37 @@ const pipStyles = `
   :root[data-theme="dark"] { color-scheme: dark; }
   * { box-sizing: border-box; }
   html, body, #focusPictureInPictureMount { width: 100%; height: 100%; }
-  body { margin: 0; min-width: 260px; min-height: 170px; overflow: hidden; background: #f5f7fb; }
+  body { margin: 0; min-width: 260px; min-height: 170px; overflow: hidden; background: var(--bg,#f5f7fb); }
   .companion-shell { width: 100%; height: 100%; display: flex; flex-direction: column; overflow: hidden; }
-  .companion-tabs { height: 38px; flex: 0 0 auto; display: flex; align-items: center; gap: 4px; padding: 4px 8px; border-bottom: 1px solid #dbe2f0; background: #fff; }
-  .companion-tabs button { height: 29px; padding: 0 12px; border: 0; border-radius: 7px; color: #69758c; background: transparent; font: inherit; font-size: 11px; font-weight: 700; cursor: pointer; }
-  .companion-tabs button.active { color: #2f6ddd; background: #edf3ff; }
+  .companion-tabs { height: 38px; flex: 0 0 auto; display: flex; align-items: center; gap: 4px; padding: 4px 8px; border-bottom: 1px solid var(--border,#dbe2f0); background: var(--surface,#fff); }
+  .companion-tabs button { height: 29px; padding: 0 12px; border: 0; border-radius: 7px; color: var(--muted,#69758c); background: transparent; font: inherit; font-size: 11px; font-weight: 700; cursor: pointer; }
+  .companion-tabs button.active { color: var(--primary,#2f6ddd); background: var(--primary-soft,#edf3ff); }
   .companion-tabs button:disabled { opacity: .45; cursor: not-allowed; }
-  .companion-tabs span { min-width: 0; flex: 1; overflow: hidden; color: #69758c; font-size: 10px; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
+  .companion-tabs span { min-width: 0; flex: 1; overflow: hidden; color: var(--muted,#69758c); font-size: 10px; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
   .companion-body { min-width: 0; min-height: 0; flex: 1; overflow: hidden; }
-  .focus-pip-card { width: 100%; height: 100%; display: flex; flex-direction: column; gap: 12px; padding: 17px 18px 15px; color: #172033; background: linear-gradient(145deg,#f8faff 0%,#eef3ff 100%); }
+  .focus-pip-card { width: 100%; height: 100%; display: flex; flex-direction: column; gap: 12px; padding: 17px 18px 15px; color: var(--text,#172033); background: linear-gradient(145deg,var(--surface,#f8faff) 0%,var(--primary-soft,#eef3ff) 100%); }
   .focus-pip-heading { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
-  .focus-pip-status { display: flex; align-items: center; gap: 7px; color: #3674eb; font-size: 13px; font-weight: 700; }
-  .focus-pip-status::before { width: 7px; height: 7px; border-radius: 50%; background: #3674eb; box-shadow: 0 0 0 4px rgba(54,116,235,.12); content: ""; }
-  .focus-pip-time { color: #111a2e; font-size: clamp(34px,16vw,48px); font-weight: 780; line-height: 1; letter-spacing: 1px; font-variant-numeric: tabular-nums; }
-  .focus-pip-label { min-height: 21px; overflow: hidden; color: #69758c; font-size: 15px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
-  .focus-pip-progress { height: 5px; overflow: hidden; border-radius: 999px; background: rgba(54,116,235,.14); }
-  .focus-pip-progress > i { display: block; width: var(--progress); height: 100%; border-radius: inherit; background: linear-gradient(90deg,#4d82f4,#7b68ee); transition: width .25s linear; }
+  .focus-pip-status { display: flex; align-items: center; gap: 7px; color: var(--primary,#3674eb); font-size: 13px; font-weight: 700; }
+  .focus-pip-status::before { width: 7px; height: 7px; border-radius: 50%; background: var(--primary,#3674eb); box-shadow: 0 0 0 4px color-mix(in srgb,var(--primary,#3674eb) 14%,transparent); content: ""; }
+  .focus-pip-time { color: var(--text,#111a2e); font-size: clamp(34px,16vw,48px); font-weight: 780; line-height: 1; letter-spacing: 1px; font-variant-numeric: tabular-nums; }
+  .focus-pip-label { min-height: 21px; overflow: hidden; color: var(--text-soft,#69758c); font-size: 15px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+  .focus-pip-progress { height: 5px; overflow: hidden; border-radius: 999px; background: var(--primary-soft,rgba(54,116,235,.14)); }
+  .focus-pip-progress > i { display: block; width: var(--progress); height: 100%; border-radius: inherit; background: linear-gradient(90deg,var(--primary,#4d82f4),color-mix(in srgb,var(--primary,#4d82f4) 68%,#8a68ee)); transition: width .25s linear; }
   .focus-pip-actions { display: flex; gap: 8px; margin-top: auto; }
-  .focus-pip-actions button { min-width: 0; min-height: 38px; flex: 1; padding: 0 10px; border: 1px solid #dbe2f0; border-radius: 9px; color: #344057; background: rgba(255,255,255,.9); font: inherit; font-size: 12px; font-weight: 650; cursor: pointer; }
-  .focus-pip-actions button:hover { border-color: #76a0f5; color: #2868e8; background: #fff; }
-  .focus-pip-actions button.primary { border-color: #3674eb; color: #fff; background: #3674eb; }
+  .focus-pip-actions button { min-width: 0; min-height: 38px; flex: 1; padding: 0 10px; border: 1px solid var(--border,#dbe2f0); border-radius: 9px; color: var(--text-soft,#344057); background: var(--surface,#fff); font: inherit; font-size: 12px; font-weight: 650; cursor: pointer; }
+  .focus-pip-actions button:hover { border-color: var(--primary,#76a0f5); color: var(--primary,#2868e8); background: var(--surface,#fff); }
+  .focus-pip-actions button.primary { border-color: var(--primary,#3674eb); color: #fff; background: var(--primary,#3674eb); }
   .focus-pip-actions button.danger { color: #d44d5c; }
   .focus-pip-actions button:disabled { opacity: .55; cursor: wait; }
   .pip-start-backdrop { position: absolute; inset: 38px 0 0; z-index: 20; display: grid; place-items: center; padding: 14px; background: rgba(15,23,42,.34); }
-  .pip-start-form { width: min(360px, 100%); max-height: 100%; overflow: auto; display: grid; gap: 10px; padding: 16px; border: 1px solid #dbe2f0; border-radius: 13px; color: #172033; background: #fff; box-shadow: 0 18px 46px rgba(15,23,42,.24); font-size: 12px; }
+  .pip-start-form { width: min(360px, 100%); max-height: 100%; overflow: auto; display: grid; gap: 10px; padding: 16px; border: 1px solid var(--border,#dbe2f0); border-radius: 13px; color: var(--text,#172033); background: var(--surface,#fff); box-shadow: 0 18px 46px rgba(15,23,42,.24); font-size: 12px; }
   .pip-start-form h3 { margin: 0 0 3px; font-size: 16px; }
-  .pip-start-form label { display: grid; gap: 4px; color: #69758c; font-size: 11px; font-weight: 650; }
-  .pip-start-form input,.pip-start-form select { min-width: 0; height: 32px; padding: 0 8px; border: 1px solid #dbe2f0; border-radius: 7px; color: #172033; background: #f8faff; font: inherit; }
+  .pip-start-form label { display: grid; gap: 4px; color: var(--text-soft,#69758c); font-size: 11px; font-weight: 650; }
+  .pip-start-form input,.pip-start-form select { min-width: 0; height: 32px; padding: 0 8px; border: 1px solid var(--border,#dbe2f0); border-radius: 7px; color: var(--text,#172033); background: var(--surface-soft,#f8faff); font: inherit; }
   .pip-start-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .pip-start-actions { display: flex; justify-content: flex-end; gap: 7px; margin-top: 3px; }
-  .pip-start-actions button { min-height: 32px; padding: 0 12px; border: 1px solid #dbe2f0; border-radius: 7px; color: #344057; background: #fff; font: inherit; cursor: pointer; }
-  .pip-start-actions button.primary { border-color: #3674eb; color: #fff; background: #3674eb; }
+  .pip-start-actions button { min-height: 32px; padding: 0 12px; border: 1px solid var(--border,#dbe2f0); border-radius: 7px; color: var(--text-soft,#344057); background: var(--surface,#fff); font: inherit; cursor: pointer; }
+  .pip-start-actions button.primary { border-color: var(--primary,#3674eb); color: #fff; background: var(--primary,#3674eb); }
   .pip-start-error { margin: 0; color: #d44d5c; font-size: 11px; }
   :root[data-theme="dark"] body { background: #101522; }
   :root[data-theme="dark"] .focus-pip-card { color: #e8edf8; background: linear-gradient(145deg,#1c2434 0%,#141b29 100%); }

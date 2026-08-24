@@ -162,7 +162,7 @@ export const useProductivityStore = defineStore("productivity", () => {
     }
     const index = state.value.scheduleEntries.findIndex((item) => item.id === existingId);
     if (index >= 0) Object.assign(state.value.scheduleEntries[index], clean); else state.value.scheduleEntries.push(clean);
-    await persist("manual");
+    if (!await persist("manual")) throw new Error("日程未能写入数据库，请保留当前页面并在数据安全中心重试");
   }
 
   async function deleteSchedule(id: string): Promise<void> {
@@ -198,7 +198,7 @@ export const useProductivityStore = defineStore("productivity", () => {
       if (entry) { entry.completed = completed ?? !entry.completed; entry.updatedAt = nowIso(); }
     }
     touch();
-    await persist("manual");
+    if (!await persist("manual")) throw new Error("日程状态未能写入数据库，请保留当前页面并在数据安全中心确认");
   }
 
   async function saveSeries(input: Partial<ScheduleSeries> & Pick<ScheduleSeries, "title" | "startDate">, existingId = ""): Promise<void> {
@@ -218,7 +218,7 @@ export const useProductivityStore = defineStore("productivity", () => {
     }
     const index = state.value.scheduleSeries.findIndex((entry) => entry.id === existingId);
     if (index >= 0) Object.assign(state.value.scheduleSeries[index], item); else state.value.scheduleSeries.push(item);
-    await persist("manual");
+    if (!await persist("manual")) throw new Error("固定日程未能写入数据库，请保留当前页面并在数据安全中心确认");
   }
 
   async function deleteSeries(id: string): Promise<void> {

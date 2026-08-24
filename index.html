@@ -49,7 +49,7 @@
           <button class="icon-button floating-notes-button" id="floatingNotesButton" aria-label="打开悬浮笔记工作区" title="悬浮笔记工作区">
             <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 9h10M7 13h7"/></svg>
           </button>
-          <button class="icon-button" id="themeToggle" aria-label="切换深色模式" title="切换主题">
+          <button class="icon-button" id="themeToggle" aria-label="选择界面色调" title="界面色调" aria-haspopup="true" aria-expanded="false">
             <svg class="sun-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.66 6.34l1.41-1.41" /></svg>
           </button>
           <button class="primary-button" id="newNoteTop"><span>＋</span> 新建笔记</button>
@@ -66,6 +66,18 @@
           <hr />
           <button data-layout-action="focus"><span>进入专注模式</span><kbd>Ctrl Shift F</kbd></button>
           <button data-layout-action="reset"><span>恢复默认布局</span></button>
+        </div>
+        <div class="theme-popover" id="themePopover" hidden>
+          <header><strong>界面色调</strong><span>A 云雾蓝为默认</span></header>
+          <div class="theme-options" role="menu" aria-label="选择界面色调">
+            <button class="theme-option" type="button" data-theme-option="light" role="menuitemradio" aria-checked="false"><i></i><span><strong>A · 云雾蓝</strong><small>清爽、专业、耐看</small></span><em>✓</em></button>
+            <button class="theme-option" type="button" data-theme-option="warm" role="menuitemradio" aria-checked="false"><i></i><span><strong>B · 奶油暖杏</strong><small>温暖、柔和、放松</small></span><em>✓</em></button>
+            <button class="theme-option" type="button" data-theme-option="mint" role="menuitemradio" aria-checked="false"><i></i><span><strong>C · 薄荷青黛</strong><small>安静、自然、专注</small></span><em>✓</em></button>
+            <button class="theme-option" type="button" data-theme-option="purple" role="menuitemradio" aria-checked="false"><i></i><span><strong>D · 暮光紫灰</strong><small>精致、克制、高级</small></span><em>✓</em></button>
+            <button class="theme-option" type="button" data-theme-option="rose" role="menuitemradio" aria-checked="false"><i></i><span><strong>E · 樱雾玫瑰</strong><small>柔软、低饱和、有个性</small></span><em>✓</em></button>
+            <button class="theme-option" type="button" data-theme-option="dark" role="menuitemradio" aria-checked="false"><i></i><span><strong>F · 深海夜蓝</strong><small>夜间使用更舒适</small></span><em>✓</em></button>
+            <button class="theme-option" type="button" data-theme-option="ice" role="menuitemradio" aria-checked="false"><i></i><span><strong>G · 冰川冷白</strong><small>冷白、通透、科技感</small></span><em>✓</em></button>
+          </div>
         </div>
       </header>
 
@@ -296,6 +308,25 @@
               </div>
 
               <div class="format-toolbar" id="formatToolbar" aria-label="格式工具栏">
+                <select id="fontFamilySelect" aria-label="字体" title="设置所选文字的字体">
+                  <option value="">字体</option>
+                  <option value="Microsoft YaHei, sans-serif">微软雅黑</option>
+                  <option value="SimHei, sans-serif">黑体</option>
+                  <option value="SimSun, serif">宋体</option>
+                  <option value="KaiTi, serif">楷体</option>
+                  <option value="FangSong, serif">仿宋</option>
+                </select>
+                <select id="fontSizeSelect" aria-label="字号" title="设置所选文字的字号">
+                  <option value="">字号</option>
+                  <option value="12px">小（12）</option>
+                  <option value="14px">正文（14）</option>
+                  <option value="16px">中（16）</option>
+                  <option value="18px">大（18）</option>
+                  <option value="24px">标题（24）</option>
+                  <option value="32px">特大（32）</option>
+                </select>
+                <button id="formatPainterButton" type="button" title="先选中示例文字，再点击格式刷，然后选择目标文字">格式刷</button>
+                <span></span>
                 <button data-command="bold" title="加粗"><strong>B</strong></button>
                 <button data-command="italic" title="斜体"><em>I</em></button>
                 <button data-command="formatBlock" data-value="h2" title="二级标题">H2</button>

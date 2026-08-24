@@ -59,6 +59,8 @@ const route = useRoute();
 const router = useRouter();
 const selectedDate = ref(localDate());
 const agendaMode = ref<"list" | "timeline">("list");
+const allScheduleMode = ref<"month" | "list">("month");
+const calendarMonth = ref(`${localDate().slice(0, 7)}-01`);
 const showCompleted = ref(true);
 const quickTitle = ref("");
 const quickStart = ref("");
@@ -104,14 +106,23 @@ const currentQuote = computed(() => {
 const pendingCount = computed(() => store.entriesOn(selectedDate.value).filter((item) => !item.completed).length);
 const completedCount = computed(() => store.entriesOn(selectedDate.value).filter((item) => item.completed).length);
 const completionRate = computed(() => pendingCount.value + completedCount.value ? Math.round(completedCount.value / (pendingCount.value + completedCount.value) * 100) : 0);
-const groupedSchedules = computed(() => {
-  const groups = new Map<string, ScheduleEntry[]>();
-  store.schedules.slice().sort((a, b) => `${a.date}${a.startTime || ""}`.localeCompare(`${b.date}${b.startTime || ""}`)).forEach((item) => {
-    if ((!showCompleted.value && item.completed) || !matchesSearch(item)) return;
-    if (!groups.has(item.date)) groups.set(item.date, []);
-    groups.get(item.date)!.push(item);
+const calendarMonthLabel = computed(() => formatDate(calendarMonth.value, { year: "numeric", month: "long" }));
+const calendarDays = computed(() => {
+  const monthStart = parseLocalDate(calendarMonth.value) ?? new Date();
+  const first = new Date(monthStart.getFullYear(), monthStart.getMonth(), 1);
+  const gridStart = addDays(first, -((first.getDay() + 6) % 7));
+  return Array.from({ length: 42 }, (_, index) => {
+    const dateValue = localDate(addDays(gridStart, index));
+    const entries = store.entriesOn(dateValue)
+      .filter((item) => (showCompleted.value || !item.completed) && matchesSearch(item))
+      .sort((a, b) => Number(b.allDay) - Number(a.allDay) || (a.startTime || "").localeCompare(b.startTime || "") || a.title.localeCompare(b.title));
+    return { date: dateValue, currentMonth: dateValue.slice(0, 7) === calendarMonth.value.slice(0, 7), entries };
   });
-  return [...groups.entries()];
+});
+const groupedSchedules = computed(() => {
+  return calendarDays.value
+    .filter((day) => day.currentMonth && day.entries.length)
+    .map((day) => [day.date, day.entries] as [string, ScheduleEntry[]]);
 });
 function focusSessionDate(item: FocusSession): string { return localDate(new Date(item.startedAt)); }
 function linkedFocusTask(item: FocusSession) { return item.taskId ? store.tasks.find((task) => task.id === item.taskId) : undefined; }
@@ -173,8 +184,19 @@ function formatDate(value: string, options: Intl.DateTimeFormatOptions = { month
   const date = parseLocalDate(value); return date ? new Intl.DateTimeFormat("zh-CN", options).format(date) : value;
 }
 function timeLabel(item: ScheduleEntry): string { return item.allDay ? "全天" : `${item.startTime || "--:--"}${item.endTime ? `–${item.endTime}` : ""}`; }
+function calendarTimeLabel(item: ScheduleEntry): string {
+  if (item.allDay) return "全天";
+  const slots = scheduleSlotsFor(item);
+  if (!slots.length) return "待定";
+  return `${slots[0].startTime || "待定"}${slots.length > 1 ? ` +${slots.length - 1}` : ""}`;
+}
 function changeDay(delta: number) { selectedDate.value = localDate(addDays(parseLocalDate(selectedDate.value) ?? new Date(), delta)); }
 function selectDate(value: string) { selectedDate.value = value; void router.push("/schedule"); }
+function changeCalendarMonth(delta: number) {
+  const current = parseLocalDate(calendarMonth.value) ?? new Date();
+  calendarMonth.value = localDate(new Date(current.getFullYear(), current.getMonth() + delta, 1));
+}
+function showCurrentCalendarMonth() { calendarMonth.value = `${localDate().slice(0, 7)}-01`; }
 function startDateSwipe(event: TouchEvent) { swipeStartX = event.changedTouches[0]?.clientX || 0; }
 function finishDateSwipe(event: TouchEvent) { const distance = (event.changedTouches[0]?.clientX || 0) - swipeStartX; if (Math.abs(distance) >= 48) changeDay(distance < 0 ? 1 : -1); }
 async function requestReminderPermission() {
@@ -410,7 +432,76 @@ onBeforeUnmount(() => { window.clearInterval(clockTimer); document.removeEventLi
       </div>
     </template>
 
-    <section v-else-if="view === 'all'" class="productivity-page"><header><div><span>按日期浏览所有安排</span><h1>总日程</h1></div><label><input v-model="showCompleted" type="checkbox"> 显示已完成</label></header><div v-if="groupedSchedules.length" class="total-groups"><section v-for="[date, items] in groupedSchedules" :key="date"><header><button type="button" @click="selectDate(date)"><strong>{{ formatDate(date) }}</strong><span>{{ items.length }} 项</span></button></header><ScheduleCard v-for="item in items" :key="item.id" :item="item" status-action @edit="editSchedule(item)" @context="openScheduleContext" /></section></div><div v-else class="productivity-empty">暂无日程</div></section>
+    <section v-else-if="view === 'all'" class="productivity-page total-schedule-page">
+      <header class="total-schedule-header">
+        <div><span>按月或列表浏览所有安排</span><h1>总日程</h1></div>
+        <div class="total-schedule-actions">
+          <label><input v-model="showCompleted" type="checkbox"> 显示已完成</label>
+          <div class="total-view-switch" aria-label="总日程视图">
+            <button :class="{ active: allScheduleMode === 'month' }" type="button" @click="allScheduleMode = 'month'">月历</button>
+            <button :class="{ active: allScheduleMode === 'list' }" type="button" @click="allScheduleMode = 'list'">列表</button>
+          </div>
+          <button class="primary-button" type="button" @click="editSchedule(undefined, { date: selectedDate })">＋ 新建日程</button>
+        </div>
+      </header>
+
+      <div v-if="allScheduleMode === 'month'" class="month-calendar-shell">
+        <nav class="month-calendar-controls" aria-label="月历导航">
+          <div>
+            <button type="button" aria-label="上个月" @click="changeCalendarMonth(-1)">‹</button>
+            <button type="button" @click="showCurrentCalendarMonth">今天</button>
+            <button type="button" aria-label="下个月" @click="changeCalendarMonth(1)">›</button>
+          </div>
+          <strong>{{ calendarMonthLabel }}</strong>
+          <small>双击日期空白处可直接新建日程</small>
+        </nav>
+        <div class="month-calendar-scroll">
+          <div class="month-calendar">
+            <div v-for="weekday in ['一','二','三','四','五','六','日']" :key="weekday" class="month-calendar-weekday">周{{ weekday }}</div>
+            <article
+              v-for="day in calendarDays"
+              :key="day.date"
+              class="month-calendar-day"
+              :class="{ outside: !day.currentMonth, today: day.date === localDate() }"
+              @dblclick.self="editSchedule(undefined, { date: day.date })"
+            >
+              <button class="month-calendar-date" type="button" :aria-label="`${formatDate(day.date)}，${day.entries.length} 项日程`" @click="selectDate(day.date)">
+                <span>{{ Number(day.date.slice(-2)) }}</span><small v-if="day.date === localDate()">今天</small>
+              </button>
+              <div class="month-calendar-events">
+                <button
+                  v-for="item in day.entries.slice(0, 4)"
+                  :key="item.id"
+                  class="month-calendar-event"
+                  :class="{ done: item.completed }"
+                  :style="{ '--calendar-event-color': item.color || '#4f7df3' }"
+                  type="button"
+                  :title="`${timeLabel(item)} ${item.title}`"
+                  @click.stop="editSchedule(item)"
+                  @contextmenu.prevent.stop="openTimelineContext(item, $event)"
+                >
+                  <small>{{ calendarTimeLabel(item) }}</small><strong>{{ item.title }}</strong><i v-if="item.id.includes('@')">↻</i>
+                </button>
+                <button v-if="day.entries.length > 4" class="month-calendar-more" type="button" @click.stop="selectDate(day.date)">还有 {{ day.entries.length - 4 }} 项</button>
+              </div>
+            </article>
+          </div>
+        </div>
+      </div>
+      <div v-else class="total-list-shell">
+        <nav class="month-calendar-controls" aria-label="列表月份导航">
+          <div>
+            <button type="button" aria-label="上个月" @click="changeCalendarMonth(-1)">‹</button>
+            <button type="button" @click="showCurrentCalendarMonth">今天</button>
+            <button type="button" aria-label="下个月" @click="changeCalendarMonth(1)">›</button>
+          </div>
+          <strong>{{ calendarMonthLabel }}</strong>
+          <small>包含本月普通日程和固定日程</small>
+        </nav>
+        <div v-if="groupedSchedules.length" class="total-groups"><section v-for="[date, items] in groupedSchedules" :key="date"><header><button type="button" @click="selectDate(date)"><strong>{{ formatDate(date) }}</strong><span>{{ items.length }} 项</span></button></header><ScheduleCard v-for="item in items" :key="item.id" :item="item" status-action @edit="editSchedule(item)" @context="openScheduleContext" /></section></div>
+        <div v-else class="productivity-empty">本月暂无日程</div>
+      </div>
+    </section>
     <section v-else-if="view === 'series'" class="productivity-page"><header><div><span>管理重复规则</span><h1>固定日程</h1></div><button class="primary-button" type="button" @click="editSeries()">＋ 新建固定日程</button></header><div class="series-grid"><article v-for="item in store.series" :key="item.id" class="series-card" :class="{ paused: item.active === false }" :style="{ '--schedule-color': item.color }" @contextmenu.prevent="openSeriesContext(item, $event)"><header><div><strong>{{ item.title }}</strong><span>{{ recurrenceLabel(item.recurrenceType) }} · 每 {{ item.recurrenceInterval }} 个周期</span></div><b>{{ item.active === false ? '已暂停' : '启用中' }}</b></header><div class="series-time"><span>{{ seriesTimeLabel(item) }}</span><small>{{ item.reminderMode === 'none' ? '不提醒' : '按时间提醒' }}</small></div><p>{{ item.notes || '暂无备注' }}</p><footer><span>{{ item.startDate }}{{ item.until ? ` 至 ${item.until}` : ' · 长期' }}</span><div><button @click="editSeries(item)">编辑</button><button class="danger-text" @click="store.deleteSeries(item.id)">删除</button></div></footer></article><div v-if="!store.series.length" class="productivity-empty planning-empty"><strong>还没有固定日程</strong><span>把每天、每周或每月重复的安排建立成规则。</span><button type="button" @click="editSeries()">新建第一条规则</button></div></div></section>
 
     <section v-else-if="view === 'focus'" class="productivity-page focus-history-page">
