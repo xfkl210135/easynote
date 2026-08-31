@@ -33,7 +33,11 @@ let statusToken = 0;
 let uiRefreshTimer = 0;
 let editorLoadToken = 0;
 let autoSaveTimer = 0;
-const plainTextCache = new Map<string, string>();
+let richCommitTimer = 0;
+let richDirtyNoteId = "";
+let markdownCommitTimer = 0;
+let markdownDirtyNoteId = "";
+const plainTextCache = new Map<string, { source: string; value: string }>();
 
 const runtime = computed(() => easyNoteRuntime.value);
 const state = computed(() => { revision.value; return runtime.value?.state ?? null; });
@@ -66,21 +70,21 @@ const folderPickerRows = computed(() => {
 });
 
 function touch() { revision.value += 1; }
-function scheduleUiRefresh(delay = 120) {
+function scheduleUiRefresh(delay = 240) {
   window.clearTimeout(uiRefreshTimer);
   uiRefreshTimer = window.setTimeout(() => { uiRefreshTimer = 0; touch(); }, delay);
 }
 function now() { return new Date().toISOString(); }
 function makeId(prefix: string) { return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`; }
 function windowForWorkspace(): Window { return editor.value?.ownerDocument.defaultView ?? window; }
-function plainText(html: string): string {
-  const source = html || "";
-  const cached = plainTextCache.get(source);
-  if (cached !== undefined) return cached;
+function plainText(note: Note): string {
+  const source = note.content || "";
+  const cached = plainTextCache.get(note.id);
+  if (cached?.source === source) return cached.value;
   const container = document.createElement("div"); container.innerHTML = source;
   const value = (container.textContent || "").replace(/\s+/g, " ").trim();
-  if (plainTextCache.size > 600) plainTextCache.clear();
-  plainTextCache.set(source, value);
+  if (plainTextCache.size > 300) plainTextCache.clear();
+  plainTextCache.set(note.id, { source, value });
   return value;
 }
 function formatDate(value: string): string {
@@ -107,7 +111,7 @@ const visibleNotes = computed(() => {
     if (selectedFolderId.value) notes = notes.filter((note) => note.categoryId === selectedFolderId.value);
   }
   const query = search.value.trim().toLowerCase();
-  if (query) notes = notes.filter((note) => `${note.title} ${(note.tags || []).join(" ")} ${plainText(note.content)}`.toLowerCase().includes(query));
+  if (query) notes = notes.filter((note) => `${note.title} ${(note.tags || []).join(" ")} ${plainText(note)}`.toLowerCase().includes(query));
   return notes.sort((left, right) => sort.value === "title"
     ? (left.title || "无标题笔记").localeCompare(right.title || "无标题笔记", "zh-CN")
     : String(sort.value === "created" ? right.createdAt : right.updatedAt).localeCompare(String(sort.value === "created" ? left.createdAt : left.updatedAt)));
@@ -181,19 +185,29 @@ async function persist(immediate = false, reason = "auto") {
   return saved;
 }
 
-function scheduleAutoSave(delay = 350) {
+function scheduleAutoSave(delay = 750) {
   window.clearTimeout(autoSaveTimer);
   saveStatus.value = "dirty";
   autoSaveTimer = window.setTimeout(() => { autoSaveTimer = 0; void persist(true, "auto"); }, delay);
 }
 
+function commitRichContent(scheduleSave = true) {
+  window.clearTimeout(richCommitTimer); richCommitTimer = 0;
+  const note = activeNote.value, root = editor.value;
+  if (!note || !root || note.deletedAt || editMode.value !== "rich" || richDirtyNoteId !== note.id) return false;
+  ensureTrailingParagraph(root);
+  if (replaceCompletedMermaidFences(root)) void hydrateMermaidDiagrams(root);
+  note.content = floatingHtmlForStorage(root); note.updatedAt = now(); richDirtyNoteId = "";
+  if (scheduleSave) scheduleAutoSave();
+  return true;
+}
+
 function syncRichContent() {
   const note = activeNote.value, root = editor.value;
   if (!note || !root || note.deletedAt || editMode.value !== "rich") return;
-  ensureTrailingParagraph(root);
-  if (replaceCompletedMermaidFences(root)) void hydrateMermaidDiagrams(root);
-  note.content = floatingHtmlForStorage(root); note.updatedAt = now(); scheduleUiRefresh(); scheduleAutoSave();
-  root.ownerDocument.defaultView?.setTimeout(convertRichMarkdownShortcut, 0);
+  richDirtyNoteId = note.id; saveStatus.value = "dirty";
+  window.clearTimeout(richCommitTimer);
+  richCommitTimer = window.setTimeout(() => { richCommitTimer = 0; commitRichContent(true); }, 300);
 }
 
 function floatingHtmlForStorage(root = editor.value): string {
@@ -225,7 +239,7 @@ function convertRichMarkdownShortcut() {
   if (rule.list) replacement.append(caretTarget);
   block.replaceWith(replacement);
   const caret = root.ownerDocument.createRange(); caret.selectNodeContents(caretTarget); caret.collapse(false); selection.removeAllRanges(); selection.addRange(caret); savedRange = caret.cloneRange();
-  const note = activeNote.value; if (note) { note.content = floatingHtmlForStorage(root); note.updatedAt = now(); scheduleUiRefresh(); scheduleAutoSave(); }
+  syncRichContent();
 }
 
 function applyRichMarkdownShortcut(event: KeyboardEvent): boolean {
@@ -302,14 +316,19 @@ function deleteTextBlock(block: HTMLElement | null) {
   block.remove(); selectedTextBlock.value = null; ensureTrailingParagraph(root);
   placeCaretAtEnd(previous || root.lastElementChild as HTMLElement || root); syncRichContent();
 }
-function updateTitle(value: string) { const note = activeNote.value; if (!note || note.deletedAt) return; note.title = value; note.updatedAt = now(); scheduleUiRefresh(); scheduleAutoSave(); }
+function updateTitle(value: string) { const note = activeNote.value; if (!note || note.deletedAt) return; note.title = value; note.updatedAt = now(); scheduleAutoSave(); }
 function updateCategory(value: string) { const note = activeNote.value; if (!note || note.deletedAt || !canChooseNoteFolder.value) return; note.categoryId = value; note.updatedAt = now(); touch(); void persist(true, "manual"); }
-function updateTags(value: string) { const note = activeNote.value; if (!note || note.deletedAt) return; note.tags = value.split(/[,，]/).map((tag) => tag.trim()).filter(Boolean); note.updatedAt = now(); scheduleUiRefresh(); scheduleAutoSave(); }
+function updateTags(value: string) { const note = activeNote.value; if (!note || note.deletedAt) return; note.tags = value.split(/[,，]/).map((tag) => tag.trim()).filter(Boolean); note.updatedAt = now(); scheduleAutoSave(); }
+
+function commitPendingEditorContent() {
+  const note = activeNote.value;
+  if (!note || note.deletedAt) return;
+  if (editMode.value === "rich") commitRichContent(false);
+  else commitMarkdownContent(false);
+}
 
 async function flushCurrent(reason = "switch") {
-  const note = activeNote.value;
-  if (note && !note.deletedAt && editMode.value === "rich" && editor.value) { ensureTrailingParagraph(editor.value); note.content = floatingHtmlForStorage(editor.value); }
-  if (note && !note.deletedAt && editMode.value === "markdown") note.content = markdownToHtml(markdownText.value);
+  commitPendingEditorContent();
   return persist(true, reason);
 }
 
@@ -373,6 +392,7 @@ async function selectFolder(folderId: string) {
   const note = activeNote.value;
   folderPickerOpen.value = false;
   if (!note || note.deletedAt || note.categoryId === folderId) return;
+  commitPendingEditorContent();
   note.categoryId = folderId; note.updatedAt = now(); touch();
   await persist(true, "manual");
 }
@@ -454,13 +474,33 @@ function markdownToHtml(markdown: string): string {
   closeList();
   return result.join("\n").replace(/@@IMAGE(\d+)@@/g, (_m, index) => images[Number(index)]).replace(/@@CODE(\d+)@@/g, (_m, index) => code[Number(index)]);
 }
+function commitMarkdownContent(scheduleSave = true) {
+  window.clearTimeout(markdownCommitTimer); markdownCommitTimer = 0;
+  const note = activeNote.value;
+  if (!note || note.deletedAt || editMode.value !== "markdown" || markdownDirtyNoteId !== note.id) return false;
+  note.content = markdownToHtml(markdownText.value); note.updatedAt = now(); markdownDirtyNoteId = "";
+  if (scheduleSave) scheduleAutoSave();
+  return true;
+}
+
 async function toggleMode() {
   const note = activeNote.value; if (!note) return;
-  if (editMode.value === "rich") { if (editor.value) note.content = floatingHtmlForStorage(editor.value); markdownText.value = htmlToMarkdown(editor.value?.innerHTML || note.content); editMode.value = "markdown"; }
-  else { note.content = markdownToHtml(markdownText.value); editMode.value = "rich"; await nextTick(); if (editor.value) { editor.value.innerHTML = note.content; void hydrateMermaidDiagrams(editor.value); } }
+  if (editMode.value === "rich") {
+    commitRichContent(false);
+    markdownText.value = htmlToMarkdown(editor.value?.innerHTML || note.content); editMode.value = "markdown";
+  } else {
+    commitMarkdownContent(false);
+    note.content = markdownToHtml(markdownText.value); editMode.value = "rich";
+    await nextTick(); if (editor.value) { editor.value.innerHTML = note.content; void hydrateMermaidDiagrams(editor.value); }
+  }
   note.updatedAt = now(); touch(); void persist(true, "manual");
 }
-function onMarkdownInput() { const note = activeNote.value; if (!note || note.deletedAt) return; note.content = markdownToHtml(markdownText.value); note.updatedAt = now(); scheduleUiRefresh(); scheduleAutoSave(); }
+function onMarkdownInput() {
+  const note = activeNote.value; if (!note || note.deletedAt) return;
+  markdownDirtyNoteId = note.id; saveStatus.value = "dirty";
+  window.clearTimeout(markdownCommitTimer);
+  markdownCommitTimer = window.setTimeout(() => { markdownCommitTimer = 0; commitMarkdownContent(true); }, 300);
+}
 
 async function processImage(file: File): Promise<Blob> {
   if (!/^image\/(jpeg|png|webp|gif)$/.test(file.type)) throw new Error("仅支持 JPEG、PNG、WebP 和 GIF 图片");
@@ -582,16 +622,16 @@ async function createFolder() {
   const name = windowForWorkspace().prompt("文件夹名称", "新建文件夹")?.trim(); if (!name) return;
   current.categories.push({ id: makeId("folder"), name, color: "#4f7df3", parentId: selectedFolderId.value || null }); touch(); await persist(true, "manual");
 }
-async function toggleFavorite(note = activeNote.value) { if (!note || note.deletedAt) return; note.favorite = !note.favorite; note.updatedAt = now(); touch(); await persist(true, "manual"); }
+async function toggleFavorite(note = activeNote.value) { if (!note || note.deletedAt) return; if (note.id === activeNote.value?.id) commitPendingEditorContent(); note.favorite = !note.favorite; note.updatedAt = now(); touch(); await persist(true, "manual"); }
 async function duplicateNote(note = activeNote.value) {
-  if (!note) return; const stamp = now(), copy: Note = { ...structuredClone(note), id: makeId("note"), title: `${note.title || "无标题笔记"}（副本）`, createdAt: stamp, updatedAt: stamp, deletedAt: null };
+  if (!note) return; if (note.id === activeNote.value?.id) commitPendingEditorContent(); const stamp = now(), copy: Note = { ...structuredClone(note), id: makeId("note"), title: `${note.title || "无标题笔记"}（副本）`, createdAt: stamp, updatedAt: stamp, deletedAt: null };
   state.value?.notes.unshift(copy); touch(); await persist(true, "manual"); await selectNote(copy.id);
 }
 async function trashNote(note = activeNote.value) {
-  if (!note || note.deletedAt) return; await runtime.value?.safety.recordRecovery("note-delete", `删除笔记“${note.title || "无标题笔记"}”`, { note: structuredClone(note) }); note.deletedAt = now(); note.updatedAt = now(); touch(); await persist(true, "danger"); const next = visibleNotes.value.find((item) => item.id !== note.id); selectedNoteId.value = ""; dispatchLock(""); if (next) await selectNote(next.id);
+  if (!note || note.deletedAt) return; if (note.id === activeNote.value?.id) commitPendingEditorContent(); await runtime.value?.safety.recordRecovery("note-delete", `删除笔记“${note.title || "无标题笔记"}”`, { note: structuredClone(note) }); note.deletedAt = now(); note.updatedAt = now(); touch(); await persist(true, "danger"); const next = visibleNotes.value.find((item) => item.id !== note.id); selectedNoteId.value = ""; dispatchLock(""); if (next) await selectNote(next.id);
 }
 async function restoreNote(note = activeNote.value) { if (!note?.deletedAt) return; note.deletedAt = null; note.updatedAt = now(); touch(); await persist(true, "manual"); selectedView.value = "all"; }
-async function moveToFolder(noteId: string, folderId: string) { const note = state.value?.notes.find((item) => item.id === noteId); if (!note) return; note.categoryId = folderId; note.updatedAt = now(); touch(); await persist(true, "manual"); }
+async function moveToFolder(noteId: string, folderId: string) { const note = state.value?.notes.find((item) => item.id === noteId); if (!note) return; if (note.id === activeNote.value?.id) commitPendingEditorContent(); note.categoryId = folderId; note.updatedAt = now(); touch(); await persist(true, "manual"); }
 function showContext(event: MouseEvent, noteId: string) { event.preventDefault(); contextMenu.value = { x: Math.min(event.clientX, windowForWorkspace().innerWidth - 190), y: Math.min(event.clientY, windowForWorkspace().innerHeight - 190), noteId }; }
 async function contextAction(action: "open" | "favorite" | "duplicate" | "trash") { const note = state.value?.notes.find((item) => item.id === contextMenu.value?.noteId); contextMenu.value = null; if (!note) return; if (action === "open") await selectNote(note.id); if (action === "favorite") await toggleFavorite(note); if (action === "duplicate") await duplicateNote(note); if (action === "trash") await trashNote(note); }
 async function openInMain() { const note = activeNote.value; if (!note) return; await flushCurrent("manual"); dispatchLock(""); runtime.value?.openNote(note.id); window.focus(); }
@@ -622,6 +662,9 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   window.clearTimeout(uiRefreshTimer);
   window.clearTimeout(autoSaveTimer);
+  window.clearTimeout(richCommitTimer);
+  window.clearTimeout(markdownCommitTimer);
+  plainTextCache.clear();
   window.removeEventListener("easynote:save-status", onSaveStatus);
   const doc = editor.value?.ownerDocument; doc?.removeEventListener("selectionchange", captureSelection); doc?.removeEventListener("keydown", onKeydown); doc?.removeEventListener("click", onDocumentClick);
   dispatchLock(""); void flushCurrent("switch");
@@ -642,7 +685,7 @@ onBeforeUnmount(() => {
     </header>
 
     <div class="floating-note-layout">
-      <aside class="floating-folder-panel">
+      <aside v-if="folderPanelVisible" class="floating-folder-panel">
         <div class="floating-panel-title"><strong>笔记</strong><button type="button" title="新建文件夹" @click="createFolder">＋</button></div>
         <nav>
           <button :class="{ active: selectedView === 'all' }" type="button" @click="selectedView = 'all'">全部笔记 <em>{{ state?.notes.filter(note => !note.deletedAt).length || 0 }}</em></button>
@@ -655,7 +698,7 @@ onBeforeUnmount(() => {
         </nav>
       </aside>
 
-      <aside class="floating-note-list-panel">
+      <aside v-if="noteListVisible" class="floating-note-list-panel">
         <div class="floating-note-list-heading">
           <div><strong>{{ selectedView === 'all' ? '全部笔记' : selectedView === 'favorites' ? '我的收藏' : selectedView === 'trash' ? '回收站' : folderPath(selectedFolderId) }}</strong><span>{{ visibleNotes.length }} 篇</span></div>
           <select v-model="sort" aria-label="排序方式"><option value="updated">最近编辑</option><option value="created">最近创建</option><option value="title">标题排序</option></select>
@@ -664,7 +707,7 @@ onBeforeUnmount(() => {
         <div class="floating-note-cards">
           <article v-for="note in visibleNotes" :key="note.id" :class="{ active: note.id === selectedNoteId }" tabindex="0" @click="selectNote(note.id)" @keydown.enter="selectNote(note.id)" @contextmenu="showContext($event, note.id)">
             <div><strong>{{ note.title || '无标题笔记' }}</strong><span v-if="note.favorite">★</span></div>
-            <p>{{ plainText(note.content) || '暂无正文' }}</p>
+            <p>{{ plainText(note) || '暂无正文' }}</p>
             <footer><span>{{ folderPath(note.categoryId) || '未归档' }}</span><time>{{ formatDate(note.updatedAt) }}</time></footer>
           </article>
           <div v-if="!visibleNotes.length" class="floating-note-empty"><strong>没有符合条件的笔记</strong><button type="button" @click="createNote">新建一篇笔记</button></div>
@@ -772,10 +815,10 @@ onBeforeUnmount(() => {
 .floating-panel-title{height:52px;display:flex;align-items:center;justify-content:space-between;padding:0 13px 0 16px}.floating-panel-title button{width:29px;height:29px;border:1px solid var(--fn-border);border-radius:8px;color:#4f7df3;background:var(--fn-surface)}
 .floating-folder-panel nav{display:grid;gap:3px;padding:0 8px}.floating-folder-panel nav button{min-width:0;height:35px;display:flex;align-items:center;gap:8px;padding:0 11px;border:0;border-radius:8px;color:var(--fn-muted);background:transparent;text-align:left;cursor:pointer}.floating-folder-panel nav button:hover,.floating-folder-panel nav button.active{color:#386fd8;background:color-mix(in srgb,#4f7df3 10%,var(--fn-surface))}.floating-folder-panel nav button em{margin-left:auto;font-style:normal;font-size:10px}.floating-folder-heading{padding:18px 15px 7px;color:var(--fn-muted);font-size:10px;font-weight:700}.floating-folder-list{overflow:auto}.floating-folder-list button i{width:8px;height:8px;flex:0 0 auto;border-radius:3px}.floating-folder-list button span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .floating-note-list-heading{min-height:72px;display:grid;grid-template-columns:1fr auto;gap:6px;padding:10px 10px;border-bottom:1px solid var(--fn-border);background:var(--fn-surface)}.floating-note-list-heading>div{min-width:0;display:grid}.floating-note-list-heading strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.floating-note-list-heading span{color:var(--fn-muted);font-size:10px}.floating-note-list-heading select{max-width:102px;border:1px solid var(--fn-border);border-radius:7px;color:var(--fn-muted);background:var(--fn-surface);font-size:10px}.floating-new-note{grid-column:1/-1;height:30px;border:0;border-radius:7px;color:#fff;background:#4f7df3;font-weight:650}
-.floating-note-cards{min-height:0;flex:1;overflow:auto;padding:8px}.floating-note-cards article{display:grid;gap:7px;margin-bottom:6px;padding:11px;border:1px solid transparent;border-radius:10px;background:var(--fn-surface);cursor:pointer}.floating-note-cards article:hover,.floating-note-cards article.active{border-color:color-mix(in srgb,#4f7df3 42%,var(--fn-border));box-shadow:0 5px 16px rgba(15,23,42,.06)}.floating-note-cards article>div{display:flex;gap:6px}.floating-note-cards article strong{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px}.floating-note-cards article>div span{color:#e3a008}.floating-note-cards article p{height:34px;margin:0;overflow:hidden;color:var(--fn-muted);font-size:10px;line-height:17px}.floating-note-cards article footer{display:flex;justify-content:space-between;gap:7px;color:var(--fn-muted);font-size:9px}.floating-note-cards article footer span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.floating-note-empty,.floating-editor-empty{height:100%;display:grid;place-content:center;justify-items:center;gap:12px;color:var(--fn-muted);text-align:center}.floating-note-empty button,.floating-editor-empty button{padding:8px 12px;border:0;border-radius:8px;color:#fff;background:#4f7df3}
+.floating-note-cards{min-height:0;flex:1;overflow:auto;padding:8px}.floating-note-cards article{display:grid;gap:7px;margin-bottom:6px;padding:11px;border:1px solid transparent;border-radius:10px;background:var(--fn-surface);cursor:pointer;content-visibility:auto;contain:layout style paint;contain-intrinsic-size:0 92px}.floating-note-cards article:hover,.floating-note-cards article.active{border-color:color-mix(in srgb,#4f7df3 42%,var(--fn-border));box-shadow:0 5px 16px rgba(15,23,42,.06)}.floating-note-cards article>div{display:flex;gap:6px}.floating-note-cards article strong{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px}.floating-note-cards article>div span{color:#e3a008}.floating-note-cards article p{height:34px;margin:0;overflow:hidden;color:var(--fn-muted);font-size:10px;line-height:17px}.floating-note-cards article footer{display:flex;justify-content:space-between;gap:7px;color:var(--fn-muted);font-size:9px}.floating-note-cards article footer span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.floating-note-empty,.floating-editor-empty{height:100%;display:grid;place-content:center;justify-items:center;gap:12px;color:var(--fn-muted);text-align:center}.floating-note-empty button,.floating-editor-empty button{padding:8px 12px;border:0;border-radius:8px;color:#fff;background:#4f7df3}
 .floating-editor-panel{min-width:0;min-height:0;display:flex;flex-direction:column;background:var(--fn-surface)}.floating-editor-topline{height:48px;flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;padding:0 13px;border-bottom:1px solid var(--fn-border);color:var(--fn-muted);font-size:10px}.floating-editor-topline>div{display:flex;gap:5px}.floating-editor-topline button.danger,.floating-image-controls button.danger,.floating-context-menu button.danger{color:#d84c5a}.floating-list-toggle{display:inline-flex;align-items:center}.floating-editor-leading-actions{display:flex;align-items:center;gap:5px}.floating-editor-new-note{border-color:#4f7df3!important;color:#fff!important;background:#4f7df3!important;font-weight:700}.floating-editor-scroll{min-height:0;flex:1;overflow:auto;padding:25px clamp(22px,5vw,70px) 80px}.floating-title-input{width:100%;border:0;outline:0;color:var(--fn-text);background:transparent;font-size:clamp(25px,3vw,36px);font-weight:750}.floating-meta-row{position:relative;display:grid;grid-template-columns:minmax(230px,1.2fr) minmax(150px,.8fr) minmax(180px,1fr) auto;gap:10px;margin:15px 0}.floating-meta-row label{min-width:0;display:flex;align-items:center;gap:7px}.floating-meta-row label span{color:var(--fn-muted);font-size:10px;white-space:nowrap}.floating-meta-row input,.floating-meta-row select{min-width:0;height:33px;flex:1;padding:0 9px;border:1px solid var(--fn-border);border-radius:8px;color:var(--fn-text);background:var(--fn-soft)}.floating-note-picker{position:relative;min-width:0;display:flex;align-items:center;gap:7px}.floating-note-picker>span{color:var(--fn-muted);font-size:10px;white-space:nowrap}.floating-note-picker-trigger{min-width:0;height:40px;flex:1;display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-rows:1fr 1fr;column-gap:8px;padding:4px 8px!important;border:1px solid var(--fn-border)!important;border-radius:8px!important;color:var(--fn-text)!important;background:var(--fn-soft)!important;text-align:left}.floating-note-picker-trigger>span,.floating-note-picker-trigger>strong{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.floating-note-picker-trigger>span{color:var(--fn-muted);font-size:9px}.floating-note-picker-trigger>strong{font-size:11px}.floating-note-picker-trigger>b{grid-column:2;grid-row:1/3;align-self:center;color:var(--fn-muted);font-size:15px}.floating-note-picker-popover{position:absolute;z-index:90;top:calc(100% + 7px);left:0;width:min(420px,80vw);max-height:min(520px,65vh);display:flex;flex-direction:column;border:1px solid var(--fn-border);border-radius:12px;background:var(--fn-surface);box-shadow:0 18px 48px rgba(15,23,42,.22);overflow:hidden}.floating-note-picker-heading{height:50px;flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;padding:0 13px;border-bottom:1px solid var(--fn-border)}.floating-note-picker-heading span{color:var(--fn-muted);font-size:9px}.floating-note-tree{min-height:0;overflow:auto;padding:7px}.floating-note-tree button{width:100%;border:0;color:var(--fn-text);background:transparent;cursor:pointer;text-align:left}.floating-note-tree-folder{height:38px;display:flex;align-items:center;gap:8px;border-radius:8px!important}.floating-note-tree-folder:hover{background:var(--fn-soft)}.floating-note-tree-folder>b{width:12px;color:var(--fn-muted);font-size:17px;font-weight:400}.floating-note-tree-folder>i{width:18px;height:13px;flex:0 0 auto;border:1.5px solid;border-radius:3px}.floating-note-tree-folder>strong{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.floating-note-tree-folder>span{color:var(--fn-muted);font-size:10px}.floating-note-tree-note{height:36px;display:flex;align-items:center;gap:8px;border-radius:7px!important;color:var(--fn-muted)!important}.floating-note-tree-note:hover,.floating-note-tree-note.active{color:#386fd8!important;background:color-mix(in srgb,#4f7df3 10%,var(--fn-soft))}.floating-note-tree-note>i{font-style:normal}.floating-note-tree-note>span{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.floating-note-tree-note>time{display:none;color:var(--fn-muted);font-size:8px}
 .floating-recent-picker,.floating-folder-picker{position:relative;min-width:0;display:flex;align-items:center;gap:7px}.floating-recent-trigger,.floating-folder-picker-trigger{min-width:0;flex:1;height:40px;display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-rows:1fr 1fr;padding:4px 8px;border:1px solid var(--fn-border);border-radius:8px;color:var(--fn-text);background:var(--fn-soft);text-align:left;cursor:pointer}.floating-recent-trigger span,.floating-folder-picker>span{color:var(--fn-muted);font-size:9px}.floating-recent-trigger strong,.floating-folder-picker-trigger strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px}.floating-recent-trigger b,.floating-folder-picker-trigger b{grid-column:2;grid-row:1/3;align-self:center;color:var(--fn-muted);font-size:15px}.floating-recent-popover,.floating-folder-picker-popover{position:absolute;z-index:95;top:calc(100% + 7px);left:0;width:min(360px,76vw);max-height:min(420px,60vh);display:flex;flex-direction:column;padding:7px;border:1px solid var(--fn-border);border-radius:12px;background:var(--fn-surface);box-shadow:0 18px 48px rgba(15,23,42,.22);overflow:auto}.floating-recent-heading{height:34px;display:flex;align-items:center;justify-content:space-between;padding:0 6px;color:var(--fn-text)}.floating-recent-heading span{color:var(--fn-muted);font-size:9px}.floating-recent-popover button,.floating-folder-picker-popover button{min-height:34px;display:flex;align-items:center;gap:7px;border:0;border-radius:7px;padding:0 7px;color:var(--fn-text);background:transparent;text-align:left;cursor:pointer}.floating-recent-popover button:hover,.floating-recent-popover button.active,.floating-folder-picker-popover button:hover,.floating-folder-picker-popover button.active{color:var(--fn-primary);background:color-mix(in srgb,var(--fn-primary) 10%,var(--fn-soft))}.floating-recent-popover button span,.floating-folder-picker-popover button span{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.floating-recent-popover time{color:var(--fn-muted);font-size:9px}.floating-folder-picker-popover button i{width:8px;height:8px;flex:0 0 auto;border-radius:3px}.floating-recent-popover p{padding:14px;color:var(--fn-muted);font-size:10px;text-align:center}.floating-tags-field{display:flex!important;flex-direction:column;align-items:stretch!important;gap:3px!important}.floating-tags-field small{color:var(--fn-muted);font-size:8px;font-weight:400}.floating-folder-location>i{flex:0 0 auto;color:var(--fn-muted);font-size:11px;font-style:normal}.floating-folder-location select:disabled{cursor:not-allowed;opacity:.72}
-.floating-format-toolbar{position:sticky;z-index:4;top:-25px;display:flex;align-items:center;gap:3px;margin:8px 0 14px;padding:6px;border:1px solid var(--fn-border);border-radius:10px;background:color-mix(in srgb,var(--fn-surface) 94%,transparent);backdrop-filter:blur(12px);overflow-x:auto}.floating-format-toolbar button,.floating-image-controls button{height:30px;flex:0 0 auto;padding:0 8px;border:0;border-radius:6px;color:var(--fn-muted);background:transparent;cursor:pointer}.floating-format-toolbar button:hover,.floating-image-controls button:hover{color:#386fd8;background:color-mix(in srgb,#4f7df3 10%,var(--fn-soft))}.floating-format-toolbar i,.floating-image-controls i{width:1px;height:20px;flex:0 0 auto;background:var(--fn-border)}
+.floating-format-toolbar{position:sticky;z-index:4;top:-25px;display:flex;align-items:center;gap:3px;margin:8px 0 14px;padding:6px;border:1px solid var(--fn-border);border-radius:10px;background:var(--fn-surface);overflow-x:auto}.floating-format-toolbar button,.floating-image-controls button{height:30px;flex:0 0 auto;padding:0 8px;border:0;border-radius:6px;color:var(--fn-muted);background:transparent;cursor:pointer}.floating-format-toolbar button:hover,.floating-image-controls button:hover{color:#386fd8;background:color-mix(in srgb,#4f7df3 10%,var(--fn-soft))}.floating-format-toolbar i,.floating-image-controls i{width:1px;height:20px;flex:0 0 auto;background:var(--fn-border)}
 .floating-content-editor{min-height:calc(100vh - 260px);outline:0;color:var(--fn-text);font-size:15px;line-height:1.78}.floating-content-editor:empty::before{color:var(--fn-muted);content:attr(data-placeholder)}.floating-content-editor h1,.floating-content-editor h2,.floating-content-editor h3{line-height:1.35}.floating-content-editor blockquote{margin:12px 0;padding:8px 34px 8px 14px;border-left:3px solid #4f7df3;color:var(--fn-muted);background:var(--fn-soft)}.floating-content-editor pre{padding:13px 36px 13px 13px;border-radius:9px;background:#121827;color:#e8edf7;white-space:pre-wrap}.floating-content-editor blockquote,.floating-content-editor pre{position:relative;min-height:42px}.floating-content-editor blockquote::after,.floating-content-editor pre::after{content:"⋮";position:absolute;top:0;right:0;bottom:0;width:25px;display:grid;place-items:center;border-left:1px solid rgba(148,163,184,.22);color:#94a3b8;font:18px/1 sans-serif;cursor:pointer;opacity:.62}.floating-content-editor blockquote:hover::after,.floating-content-editor pre:hover::after{opacity:1;background:rgba(79,125,243,.08)}.floating-content-editor blockquote:has(::selection),.floating-content-editor pre:has(::selection){outline:2px solid color-mix(in srgb,#4f7df3 55%,transparent)}.floating-content-editor>p:last-child:empty,.floating-content-editor>p:last-child:has(>br:only-child){min-height:30px;margin:8px 0;cursor:text}.floating-content-editor a{color:#386fd8}.floating-content-editor img{max-width:100%;height:auto;display:block;margin:14px auto;border-radius:8px;cursor:pointer}.floating-content-editor img[data-size="small"]{width:30%}.floating-content-editor img[data-size="medium"]{width:55%}.floating-content-editor img[data-size="large"]{width:78%}.floating-content-editor img[data-size="full"]{width:100%}.floating-content-editor img:hover{outline:2px solid color-mix(in srgb,#4f7df3 55%,transparent)}.floating-image-controls{display:flex;align-items:center;gap:3px;margin:-6px 0 10px;padding:5px 7px;border:1px solid color-mix(in srgb,#4f7df3 34%,var(--fn-border));border-radius:8px;background:var(--fn-soft)}.floating-image-controls span{margin-right:5px;color:#386fd8;font-size:10px;font-weight:700}.floating-markdown-editor{width:100%;min-height:calc(100vh - 250px);resize:none;padding:14px;border:1px solid var(--fn-border);border-radius:10px;outline:0;color:var(--fn-text);background:var(--fn-soft);font:14px/1.7 Consolas,"Microsoft YaHei",monospace}
 .floating-content-editor blockquote{margin-right:28px;padding-right:14px}.floating-content-editor pre{margin-right:28px;padding-right:13px}.floating-content-editor blockquote::after,.floating-content-editor pre::after{right:-28px;border:1px solid var(--fn-border);border-radius:0 7px 7px 0;background:var(--fn-soft)}.floating-content-editor>p:last-child:empty,.floating-content-editor>p:last-child:has(>br:only-child){min-height:34px}
 .floating-context-menu{position:fixed;z-index:999;width:180px;display:grid;padding:6px;border:1px solid var(--fn-border);border-radius:10px;background:var(--fn-surface);box-shadow:0 16px 42px rgba(15,23,42,.24)}.floating-context-menu button{height:34px;border:0;border-radius:6px;color:var(--fn-text);background:transparent;text-align:left}.floating-context-menu button:hover{background:var(--fn-soft)}.floating-context-menu hr{width:100%;border:0;border-top:1px solid var(--fn-border)}

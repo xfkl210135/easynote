@@ -3,6 +3,7 @@ import { EasyNoteDataSafety } from "./data-safety";
 import { TaskManager } from "./task-manager";
 import { WhiteboardManager } from "./whiteboard-manager";
 import { installEasyNoteRuntime, VueScheduleAdapter } from "../services/legacy-runtime";
+import { mergePortableState } from "../services/data-repository";
 import { codeSourceFromBlock, editMermaidDiagram, hydrateMermaidDiagrams, mermaidSourceFromElement, prepareMermaidForStorage, renderMermaidBlock, renderMermaidSourceBlock, replaceCompletedMermaidFences } from "../services/mermaid";
 
 "use strict";
@@ -61,7 +62,7 @@ import { codeSourceFromBlock, editMermaidDiagram, hydrateMermaidDiagrams, mermai
     contextMenu: $("#contextMenu"), dialogBackdrop: $("#dialogBackdrop"), appDialog: $("#appDialog"),
     dialogTitle: $("#dialogTitle"), dialogMessage: $("#dialogMessage"), dialogField: $("#dialogField"),
     dialogLabel: $("#dialogLabel"), dialogInput: $("#dialogInput"), dialogError: $("#dialogError"),
-    dialogClose: $("#dialogClose"), dialogCancel: $("#dialogCancel"), dialogConfirm: $("#dialogConfirm"), toast: $("#toast"),
+    dialogClose: $("#dialogClose"), dialogCancel: $("#dialogCancel"), dialogAlt: $("#dialogAlt"), dialogConfirm: $("#dialogConfirm"), toast: $("#toast"),
     safetyCenterButton: $("#safetyCenterButton"), safetyBackdrop: $("#safetyBackdrop"), safetyClose: $("#safetyClose"),
     storageSummary: $("#storageSummary"), protocolAlert: $("#protocolAlert"), databaseSafetyState: $("#databaseSafetyState"),
     databaseSafetyDetail: $("#databaseSafetyDetail"), persistentStorageState: $("#persistentStorageState"), storageQuotaDetail: $("#storageQuotaDetail"),
@@ -1227,19 +1228,24 @@ import { codeSourceFromBlock, editMermaidDiagram, hydrateMermaidDiagrams, mermai
       els.dialogField.hidden = options.mode === "confirm";
       els.dialogLabel.textContent = options.label || "名称";
       els.dialogInput.type = options.type || "text"; els.dialogInput.value = options.value || ""; els.dialogInput.placeholder = options.placeholder || "";
+      els.dialogAlt.hidden = !options.altText;
+      els.dialogAlt.textContent = options.altText || "";
       els.dialogConfirm.textContent = options.confirmText || "确定";
       els.dialogConfirm.className = options.danger ? "danger-button" : "primary-button";
       els.dialogError.hidden = true; els.dialogBackdrop.hidden = false;
-      requestAnimationFrame(() => { if (options.mode === "confirm") els.dialogConfirm.focus(); else { els.dialogInput.focus(); els.dialogInput.select(); } });
+      requestAnimationFrame(() => { if (options.mode === "confirm") (options.altText ? els.dialogAlt : els.dialogConfirm).focus(); else { els.dialogInput.focus(); els.dialogInput.select(); } });
     });
   }
 
   function showInputDialog(options) { return openCenteredDialog({ mode: "input", required: true, ...options }); }
   function showConfirmDialog(options) { return openCenteredDialog({ mode: "confirm", ...options }); }
 
-  function submitDialog() {
+  function submitDialog(event = null) {
     if (!dialogState) return;
-    if (dialogState.mode === "confirm") return finishDialog(true);
+    if (dialogState.mode === "confirm") {
+      if (dialogState.altText && event?.submitter !== els.dialogConfirm) return finishDialog(dialogState.altValue || "merge");
+      return finishDialog(true);
+    }
     const value = els.dialogInput.value.trim();
     if (dialogState.required && !value) { els.dialogError.textContent = "请输入内容"; els.dialogError.hidden = false; return; }
     const error = dialogState.validate?.(value);
@@ -1500,19 +1506,20 @@ import { codeSourceFromBlock, editMermaidDiagram, hydrateMermaidDiagrams, mermai
         }
         const parsed = JSON.parse(reader.result);
         const imported = normalizeData(parsed?.format === "easynote-emergency" ? parsed.data : parsed);
-        const confirmed = await showConfirmDialog({ title: "导入备份", message: `将导入 ${imported.notes.length} 篇笔记、${imported.tasks.length} 条任务、${imported.scheduleEntries.length} 条普通日程、${imported.scheduleSeries.length} 个固定日程和 ${imported.whiteboards.length} 张白板并替换当前数据，是否继续？`, confirmText: "导入并替换", danger: true });
-        if (!confirmed) return;
+        const importMode = await showConfirmDialog({ title: "导入备份", message: `文件包含 ${imported.notes.length} 篇笔记、${imported.tasks.length} 条任务、${imported.scheduleEntries.length} 条普通日程、${imported.scheduleSeries.length} 个固定日程和 ${imported.whiteboards.length} 张白板。可选择合并到当前数据，或替换当前数据。`, altText: "合并导入", altValue: "merge", confirmText: "导入并替换", danger: true });
+        if (!importMode) return;
         flushActiveWorkspace("import");
         await safety.flush();
+        const nextState = importMode === "merge" ? mergePortableState(state, imported) : imported;
         await safety.recordRecovery("import", "导入前完整数据", structuredClone(state));
-        const saved = await safety.queueSave(imported, true, "import");
+        const saved = await safety.queueSave(nextState, true, "import");
         if (!saved) throw new Error("导入内容未能通过保存校验，旧数据已保存在紧急恢复区");
         const committed = await safety.load(false);
         if (!committed) throw new Error("导入写入成功，但重新读取数据库失败");
         await safety.verifyAttachmentReferences(committed, true);
         safety.captureStateBaselines(committed);
         replaceStateContents(committed); activeView = "all"; activeNoteId = state.notes.find((note) => !note.deletedAt)?.id || null;
-        render(); showToast("数据导入成功并已通过回读校验");
+        render(); showToast(importMode === "merge" ? "数据已合并导入并通过回读校验" : "数据导入成功并已通过回读校验");
       } catch (error) {
         console.error(error);
         const message = error instanceof SyntaxError ? "文件不是有效的 JSON" : String(error?.message || "未知错误");
@@ -2317,8 +2324,9 @@ import { codeSourceFromBlock, editMermaidDiagram, hydrateMermaidDiagrams, mermai
     [els.sidebarResizer, els.listResizer].forEach((resizer) => { resizer.addEventListener("pointerdown", (event) => startResize(event, resizer.dataset.resizer)); resizer.addEventListener("dblclick", () => { if (resizer.dataset.resizer === "sidebar") layout.sidebarWidth = DEFAULT_LAYOUT.sidebarWidth; else layout.listWidth = DEFAULT_LAYOUT.listWidth; applyLayout(); }); });
     $$('[data-collapse-panel]').forEach((button) => button.addEventListener("click", () => togglePanel(button.dataset.collapsePanel)));
 
-    els.appDialog.addEventListener("submit", (event) => { event.preventDefault(); submitDialog(); });
+    els.appDialog.addEventListener("submit", (event) => { event.preventDefault(); submitDialog(event); });
     [els.dialogClose, els.dialogCancel].forEach((button) => button.addEventListener("click", () => finishDialog(dialogState?.mode === "confirm" ? false : null)));
+    els.dialogAlt.addEventListener("click", () => finishDialog(dialogState?.altValue || "merge"));
     els.dialogBackdrop.addEventListener("mousedown", (event) => { if (event.target === els.dialogBackdrop) finishDialog(dialogState?.mode === "confirm" ? false : null); });
     els.dialogInput.addEventListener("input", () => { els.dialogError.hidden = true; });
 

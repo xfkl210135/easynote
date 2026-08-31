@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { EasyNoteRepository, normalizePortableState, type LegacyDataSafety } from "../src/services/data-repository";
+import { EasyNoteRepository, mergePortableState, normalizePortableState, type LegacyDataSafety } from "../src/services/data-repository";
 import type { AppState } from "../src/types/easynote";
 
 const legacyState = {
@@ -52,6 +52,25 @@ describe("portable v8 compatibility", () => {
     const imported = await repository.importPortable(legacyState, normalizePortableState(legacyState));
     expect(recovery).toHaveBeenCalledOnce();
     expect(queueSave).toHaveBeenCalledWith(imported, true, "import");
+  });
+
+  it("merges imported collections without duplicating ids", () => {
+    const current = normalizePortableState({ ...legacyState, notes: [{ ...legacyState.notes[0], id: "same", title: "本地" }, { ...legacyState.notes[0], id: "local-only", title: "本地新增" }] });
+    const imported = normalizePortableState({ ...legacyState, notes: [{ ...legacyState.notes[0], id: "same", title: "备份版本" }, { ...legacyState.notes[0], id: "import-only", title: "备份新增" }] });
+    const merged = mergePortableState(current, imported);
+    expect(merged.notes.map((note) => note.id)).toEqual(["same", "local-only", "import-only"]);
+    expect(merged.notes.find((note) => note.id === "same")?.title).toBe("备份版本");
+  });
+
+  it("supports merge mode in the repository import API", async () => {
+    const queueSave = vi.fn().mockResolvedValue(true);
+    const safety = { recordRecovery: vi.fn().mockResolvedValue({}), queueSave } as unknown as LegacyDataSafety;
+    const repository = new EasyNoteRepository(safety);
+    const current = normalizePortableState({ ...legacyState, notes: [{ ...legacyState.notes[0], id: "local-only" }] });
+    const imported = { ...legacyState, notes: [{ ...legacyState.notes[0], id: "import-only" }] };
+    const merged = await repository.importPortable(imported, current, "merge");
+    expect(merged.notes.map((note) => note.id)).toEqual(["local-only", "import-only"]);
+    expect(queueSave).toHaveBeenCalledWith(merged, true, "import");
   });
 
   it("does not report a failed import as successful", async () => {

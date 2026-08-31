@@ -93,11 +93,8 @@ function pictureInPictureController(): DocumentPictureInPictureController | null
   return (window as Window & { documentPictureInPicture?: DocumentPictureInPictureController }).documentPictureInPicture || null;
 }
 
-let pipTimer = 0;
 function closePictureInPicture() {
   const current = pipWindow.value;
-  if (current && pipTimer) current.clearInterval(pipTimer);
-  pipTimer = 0;
   pipMount.value = null;
   pipWindow.value = null;
   pipStartOpen.value = false;
@@ -137,12 +134,11 @@ async function openPictureInPicture(mode: "notes" | "focus" = "focus") {
     floatingWindow.document.body.append(mount);
     pipWindow.value = floatingWindow;
     pipMount.value = mount;
-    pipTimer = floatingWindow.setInterval(() => { void store.tickTimer(); }, 1000);
     floatingWindow.addEventListener("resize", () => {
       if (pipMode.value === "notes") localStorage.setItem("easynote-companion-window-size", JSON.stringify({ width: floatingWindow.innerWidth, height: floatingWindow.innerHeight }));
     });
     floatingWindow.addEventListener("pagehide", () => {
-      if (pipWindow.value === floatingWindow) { pipTimer = 0; pipMount.value = null; pipWindow.value = null; pipStartOpen.value = false; }
+      if (pipWindow.value === floatingWindow) { pipMount.value = null; pipWindow.value = null; pipStartOpen.value = false; }
     }, { once: true });
   } catch (cause) {
     if ((cause as DOMException | undefined)?.name !== "NotAllowedError") store.toast("悬浮工作区打开失败，请稍后重试");

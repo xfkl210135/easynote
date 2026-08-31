@@ -56,8 +56,9 @@ export class EasyNoteRepository {
     return this.safety.integrityCheck({ full });
   }
 
-  async importPortable(input: unknown, currentState: AppState | null): Promise<AppState> {
-    const state = normalizePortableState(input);
+  async importPortable(input: unknown, currentState: AppState | null, mode: "replace" | "merge" = "replace"): Promise<AppState> {
+    const imported = normalizePortableState(input);
+    const state = mode === "merge" && currentState ? mergePortableState(currentState, imported) : imported;
     if (currentState) {
       await this.safety.recordRecovery("import", "Vue 迁移导入前完整数据", structuredClone(currentState));
     }
@@ -65,6 +66,34 @@ export class EasyNoteRepository {
     if (!saved) throw new Error("导入数据写入验证失败");
     return state;
   }
+}
+
+/** Merge a portable archive into the current state by stable record id. */
+export function mergePortableState(current: AppState, imported: AppState): AppState {
+  const keys: Array<keyof AppState> = [
+    "categories", "files", "notes", "tasks", "taskFields", "taskViews",
+    "scheduleEntries", "scheduleSeries", "scheduleOccurrenceStates", "scheduleDailyNotes",
+    "focusSessions", "reviews", "goals", "milestones", "whiteboards",
+  ];
+  const merged = structuredClone(current) as AppState;
+  for (const key of keys) {
+    const existing = Array.isArray(merged[key]) ? merged[key] as Array<Record<string, unknown>> : [];
+    const additions = Array.isArray(imported[key]) ? imported[key] as Array<Record<string, unknown>> : [];
+    const byId = new Map<string, Record<string, unknown>>();
+    const withoutId: Record<string, unknown>[] = [];
+    for (const item of existing) {
+      const id = String(item?.id || "");
+      if (id) byId.set(id, item); else withoutId.push(item);
+    }
+    for (const item of additions) {
+      const copy = structuredClone(item);
+      const id = String(copy?.id || "");
+      if (id) byId.set(id, copy); else withoutId.push(copy);
+    }
+    (merged as unknown as Record<string, unknown>)[key] = [...byId.values(), ...withoutId];
+  }
+  merged.version = 8;
+  return merged;
 }
 
 export function normalizePortableState(input: unknown): AppState {
