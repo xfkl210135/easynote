@@ -101,6 +101,7 @@ import { codeSourceFromBlock, editMermaidDiagram, hydrateMermaidDiagrams, mermai
   let selectedTrashNoteIds = new Set();
   let outlinePane = "primary";
   let dialogState = null;
+  let moveTreeState = null;
   let pendingUploadFolderId = "";
   let fileObjectUrl = null;
   let taskManager = null;
@@ -428,15 +429,8 @@ import { codeSourceFromBlock, editMermaidDiagram, hydrateMermaidDiagrams, mermai
     });
   }
 
-  function isEmptyNote(note) {
-    if (!note) return false;
-    const title = String(note.title || "").replace(/\u200b/g, "").trim();
-    const content = String(note.content || "");
-    const text = stripHtml(content).replace(/\u200b/g, "").trim();
-    const hasRichContent = /<(?:img|hr|input|video|audio|iframe|svg)\b|data-attachment-id|data-mermaid-source|data-code-language\s*=\s*["']?mermaid/i.test(content);
-    const tags = Array.isArray(note.tags) ? note.tags.filter((tag) => String(tag || "").trim()) : [];
-    return !title && !text && !hasRichContent && tags.length === 0 && !note.favorite;
-  }
+
+
 
   function updateTrashToolbar() {
     const inTrash = activeView === "trash";
@@ -1363,19 +1357,7 @@ import { codeSourceFromBlock, editMermaidDiagram, hydrateMermaidDiagrams, mermai
     persist(true, "danger"); render(); showToast("回收站已清空，可在数据安全中心恢复 30 天");
   }
 
-  async function deleteNoteSafely(id = activeNoteId) {
-    const note = getNote(id);
-    if (!note) return;
-    if (!isEmptyNote(note)) return moveToTrash(id);
-    try { await safety.recordRecovery("note-empty-delete", `已直接清除空笔记：${note.title || "无标题笔记"}`, structuredClone(note)); }
-    catch (error) { showToast(`空笔记未清除：安全记录失败（${error?.message || "请重试"}）`); return; }
-    state.notes = state.notes.filter((item) => item.id !== id);
-    selectedTrashNoteIds.delete(id);
-    if (id === activeNoteId) activeNoteId = getVisibleNotes()[0]?.id || null;
-    const saved = await persist(true, "danger");
-    render();
-    showToast(saved ? "空笔记已直接清除（可在数据安全中心恢复）" : "空笔记已移除，保存失败；请打开数据安全中心重试");
-  }
+  // All note deletions go through the recycle bin. Empty notes are not deleted directly.
 
   async function restoreSelectedTrash() {
     const notes = state.notes.filter((note) => selectedTrashNoteIds.has(note.id) && note.deletedAt);
@@ -1964,20 +1946,15 @@ import { codeSourceFromBlock, editMermaidDiagram, hydrateMermaidDiagrams, mermai
   const sep = () => ({ separator: true });
   const menu = (label, action, options = {}) => ({ label, action, ...options });
   function sortItems() { return [menu("最近编辑", "sort", { value: "updated" }), menu("最近创建", "sort", { value: "created" }), menu("标题排序", "sort", { value: "title" })]; }
-  function categoryMoveItems(noteId) { return [menu("未归档", "move-category", { value: `${noteId}|` }), ...state.categories.map((folder) => menu(getFolderPath(folder.id), "move-category", { value: `${noteId}|${folder.id}` }))]; }
-  function folderMoveItems(folderId) {
-    const excluded = new Set([folderId, ...getDescendantFolderIds(folderId)]);
-    return [menu("移动到顶层", "move-folder", { value: `${folderId}|` }), ...state.categories.filter((folder) => !excluded.has(folder.id)).map((folder) => menu(getFolderPath(folder.id), "move-folder", { value: `${folderId}|${folder.id}` }))];
-  }
-  function fileMoveItems(fileId) { return [menu("未归档", "move-file", { value: `${fileId}|` }), ...state.categories.map((folder) => menu(getFolderPath(folder.id), "move-file", { value: `${fileId}|${folder.id}` }))]; }
-  function folderMenu(folder) { return [menu("新建笔记", "new-note", { value: folder.id }), menu("上传本地文件", "upload-file", { value: folder.id }), menu("新建子文件夹", "new-subfolder", { value: folder.id }), sep(), menu("重命名文件夹", "rename-category", { value: folder.id }), menu("移动文件夹", null, { submenu: folderMoveItems(folder.id) }), menu("删除文件夹", "delete-category", { value: folder.id, danger: true })]; }
-  function fileMenu(file) { return [menu("打开查看", "open-file", { value: file.id }), menu("下载文件", "download-file", { value: file.id }), menu("移动到文件夹", null, { submenu: fileMoveItems(file.id) }), sep(), menu("永久删除", "delete-file", { value: file.id, danger: true })]; }
+  function moveTreeMenuItem(kind, targetId, label = "移动到文件夹") { return menu(label, "open-move-tree", { value: `${kind}|${targetId}` }); }
+  function folderMenu(folder) { return [menu("新建笔记", "new-note", { value: folder.id }), menu("上传本地文件", "upload-file", { value: folder.id }), menu("新建子文件夹", "new-subfolder", { value: folder.id }), sep(), menu("重命名文件夹", "rename-category", { value: folder.id }), moveTreeMenuItem("folder", folder.id, "移动文件夹"), menu("删除文件夹", "delete-category", { value: folder.id, danger: true })]; }
+  function fileMenu(file) { return [menu("打开查看", "open-file", { value: file.id }), menu("下载文件", "download-file", { value: file.id }), moveTreeMenuItem("file", file.id), sep(), menu("永久删除", "delete-file", { value: file.id, danger: true })]; }
   function linkMenu(link) { const url = link.href; return [menu("在正文中打开", "open-link-editor", { value: url }), menu("在新标签页打开", "open-link-tab", { value: url }), sep(), menu("复制链接地址", "copy-link", { value: url })]; }
   function noteMenu(note) {
     if (note.deletedAt) return [menu("打开查看", "open-note", { value: note.id }), sep(), menu("恢复笔记", "restore-note", { value: note.id }), menu("永久删除", "permanent-delete", { value: note.id, danger: true })];
-    return [menu("打开笔记", "open-note", { value: note.id }), menu("在右侧分栏打开", "open-secondary", { value: note.id, disabled: note.id === activeNoteId }), menu(note.favorite ? "取消收藏" : "收藏笔记", "toggle-favorite", { value: note.id }), menu("复制笔记", "duplicate-note", { value: note.id }), menu("移动到文件夹", null, { submenu: categoryMoveItems(note.id) }), sep(), menu("导出 Markdown", "export-note", { value: note.id }), menu("导入 Markdown 笔记", "import-markdown"), menu("移入回收站", "trash-note", { value: note.id, danger: true })];
+    return [menu("打开笔记", "open-note", { value: note.id }), menu("在右侧分栏打开", "open-secondary", { value: note.id, disabled: note.id === activeNoteId }), menu(note.favorite ? "取消收藏" : "收藏笔记", "toggle-favorite", { value: note.id }), menu("复制笔记", "duplicate-note", { value: note.id }), moveTreeMenuItem("note", note.id), sep(), menu("导出 Markdown", "export-note", { value: note.id }), menu("导入 Markdown 笔记", "import-markdown"), menu("移入回收站", "trash-note", { value: note.id, danger: true })];
   }
-  function imageMenu() { return [menu("图片尺寸", null, { submenu: [menu("小尺寸", "image-size", { value: "small" }), menu("中等尺寸", "image-size", { value: "medium" }), menu("大尺寸", "image-size", { value: "large" }), menu("占满正文", "image-size", { value: "full" })] }), menu("图片对齐", null, { submenu: [menu("左对齐", "image-align", { value: "left" }), menu("居中", "image-align", { value: "center" }), menu("右对齐", "image-align", { value: "right" })] }), menu("修改图片说明", "image-alt"), menu("下载图片", "image-download"), sep(), menu("删除图片", "image-delete", { danger: true })]; }
+  function imageMenu() { return [menu("图片尺寸", null, { submenu: [menu("小尺寸", "image-size", { value: "small" }), menu("中等尺寸", "image-size", { value: "medium" }), menu("大尺寸", "image-size", { value: "large" }), menu("占满正文", "image-size", { value: "full" })] }), menu("图片对齐", null, { submenu: [menu("左对齐", "image-align", { value: "left" }), menu("居中", "image-align", { value: "center" }), menu("右对齐", "image-align", { value: "right" })] }), menu("复制图片", "image-copy", { shortcut: "Ctrl C" }), menu("剪切图片", "image-cut", { shortcut: "Ctrl X" }), menu("修改图片说明", "image-alt"), menu("下载图片", "image-download"), sep(), menu("删除图片", "image-delete", { danger: true })]; }
   function mermaidSourceMenu() { return [menu("渲染 Mermaid 图表", "render-mermaid"), sep(), menu("删除 Mermaid 源码块", "delete-mermaid", { danger: true })]; }
   function mermaidDiagramMenu() { return [menu("编辑 Mermaid 源码", "edit-mermaid"), sep(), menu("删除 Mermaid 图表", "delete-mermaid", { danger: true })]; }
   function selectionMenu() { return [menu("剪切", "cut", { shortcut: "Ctrl X" }), menu("复制", "copy", { shortcut: "Ctrl C" }), sep(), menu("加粗", "editor-command", { value: "bold", shortcut: "Ctrl B" }), menu("斜体", "editor-command", { value: "italic", shortcut: "Ctrl I" }), menu("设置标题", null, { submenu: [menu("正文", "format-block", { value: "p" }), menu("二级标题", "format-block", { value: "h2" }), menu("三级标题", "format-block", { value: "h3" })] }), menu("引用", "format-block", { value: "blockquote" }), menu("代码块", "format-block", { value: "pre" }), menu("添加链接", "insert-link"), menu("清除格式", "editor-command", { value: "removeFormat" })]; }
@@ -1992,11 +1969,99 @@ import { codeSourceFromBlock, editMermaidDiagram, hydrateMermaidDiagrams, mermai
     }).join("");
   }
   function openContextMenu(x, y, items, payload = {}) {
-    closeContextMenu(); contextPayload = payload; if (payload.image) payload.image.classList.add("context-target"); els.contextMenu.innerHTML = buildContextMenu(items); els.contextMenu.hidden = false;
+    closeContextMenu(); contextPayload = payload; if (payload.image) payload.image.classList.add("context-target");
+    els.contextMenu.innerHTML = buildContextMenu(items); els.contextMenu.hidden = false;
     const rect = els.contextMenu.getBoundingClientRect(); els.contextMenu.classList.toggle("flip-submenus", x + rect.width * 2 > innerWidth);
     els.contextMenu.style.left = `${clamp(x, 8, innerWidth - rect.width - 8)}px`; els.contextMenu.style.top = `${clamp(y, 8, innerHeight - rect.height - 8)}px`;
   }
-  function closeContextMenu() { els.contextMenu.hidden = true; els.contextMenu.innerHTML = ""; els.contentEditor.querySelectorAll("img.context-target").forEach((image) => image.classList.remove("context-target")); }
+  function closeContextMenu() { moveTreeState = null; els.contextMenu.hidden = true; els.contextMenu.classList.remove("move-tree-menu", "flip-submenus"); els.contextMenu.innerHTML = ""; els.contentEditor.querySelectorAll("img.context-target").forEach((image) => image.classList.remove("context-target")); }
+
+  function moveTreeCurrentFolder(kind, targetId) {
+    if (kind === "note") return getNote(targetId)?.categoryId || "";
+    if (kind === "file") return getStoredFile(targetId)?.folderId || "";
+    return getCategory(targetId)?.parentId || "";
+  }
+
+  function renderMoveTreePicker() {
+    if (!moveTreeState) return;
+    const { kind, targetId, expanded } = moveTreeState;
+    const excluded = kind === "folder" ? new Set([targetId, ...getDescendantFolderIds(targetId)]) : new Set();
+    const available = state.categories.filter((folder) => !excluded.has(folder.id));
+    const availableIds = new Set(available.map((folder) => folder.id));
+    const byParent = new Map();
+    available.forEach((folder) => {
+      const parentId = folder.parentId && availableIds.has(folder.parentId) ? folder.parentId : "";
+      const siblings = byParent.get(parentId) || []; siblings.push(folder); byParent.set(parentId, siblings);
+    });
+    const sortFolders = (folders = []) => folders.slice().sort((left, right) => left.name.localeCompare(right.name, "zh-CN"));
+    const currentFolderId = moveTreeCurrentFolder(kind, targetId);
+    const renderFolder = (folder, depth = 0, seen = new Set()) => {
+      if (!folder || seen.has(folder.id)) return "";
+      const nextSeen = new Set(seen).add(folder.id), children = sortFolders(byParent.get(folder.id) || []), isExpanded = expanded.has(folder.id);
+      const childHtml = isExpanded ? children.map((child) => renderFolder(child, depth + 1, nextSeen)).join("") : "";
+      return `<div class="move-tree-node"><div class="move-tree-row ${folder.id === currentFolderId ? "active" : ""}" style="--move-depth:${depth}">
+        <button class="move-tree-toggle ${isExpanded ? "expanded" : ""} ${children.length ? "" : "placeholder"}" type="button" ${children.length ? `data-move-tree-toggle="${escapeAttr(folder.id)}"` : "disabled"} aria-label="${isExpanded ? "收起" : "展开"}${escapeAttr(folder.name)}"><svg viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></button>
+        <button class="move-tree-target" type="button" data-move-tree-target="${escapeAttr(folder.id)}"><i style="--move-folder-color:${getFolderColor(folder)}"></i><span>${escapeHtml(folder.name)}</span>${folder.id === currentFolderId ? "<em>当前位置</em>" : ""}</button>
+      </div>${childHtml ? `<div class="move-tree-children">${childHtml}</div>` : ""}</div>`;
+    };
+    const roots = sortFolders(byParent.get("") || []);
+    const title = kind === "folder" ? "移动文件夹" : kind === "file" ? "移动文件" : "移动笔记";
+    const rootLabel = kind === "folder" ? "顶层" : "未归档";
+    els.contextMenu.innerHTML = `<div class="move-tree-heading"><strong>${title}</strong><span>点箭头展开，点名称移动</span></div><div class="move-tree-scroll"><button class="move-tree-root ${currentFolderId ? "" : "active"}" type="button" data-move-tree-target=""><i></i><span>${rootLabel}</span>${currentFolderId ? "" : "<em>当前位置</em>"}</button>${roots.map((folder) => renderFolder(folder)).join("") || '<div class="move-tree-empty">还没有可选择的文件夹</div>'}</div>`;
+  }
+
+  function openMoveTreePicker(rawValue) {
+    const separator = String(rawValue || "").indexOf("|"), kind = String(rawValue || "").slice(0, separator), targetId = String(rawValue || "").slice(separator + 1);
+    if (separator <= 0 || !["note", "file", "folder"].includes(kind) || !targetId) return;
+    const left = parseFloat(els.contextMenu.style.left) || 8, top = parseFloat(els.contextMenu.style.top) || 8;
+    const expanded = new Set(), currentFolderId = moveTreeCurrentFolder(kind, targetId);
+    let folder = getCategory(currentFolderId), guard = 0;
+    while (folder && guard++ < 20) { expanded.add(folder.id); folder = getCategory(folder.parentId); }
+    moveTreeState = { kind, targetId, expanded };
+    els.contextMenu.classList.add("move-tree-menu"); els.contextMenu.hidden = false; renderMoveTreePicker();
+    const rect = els.contextMenu.getBoundingClientRect();
+    els.contextMenu.style.left = `${clamp(left, 8, innerWidth - rect.width - 8)}px`; els.contextMenu.style.top = `${clamp(top, 8, innerHeight - rect.height - 8)}px`;
+  }
+
+  function chooseMoveTreeTarget(folderId) {
+    if (!moveTreeState) return;
+    const { kind, targetId } = moveTreeState; closeContextMenu();
+    if (kind === "note") moveNoteToCategory(targetId, folderId);
+    else if (kind === "file") moveStoredFile(targetId, folderId);
+    else moveFolder(targetId, folderId);
+  }
+
+  async function copyImageToClipboard(image = contextPayload?.image || selectedImage, cut = false) {
+    if (!image) return false;
+    try {
+      const response = await fetch(image.currentSrc || image.src);
+      const blob = await response.blob();
+      const fallbackCopy = () => {
+        const selection = window.getSelection(), range = document.createRange();
+        range.selectNode(image); selection?.removeAllRanges(); selection?.addRange(range);
+        const copied = document.execCommand("copy"); selection?.removeAllRanges();
+        if (!copied) throw new Error("clipboard copy failed");
+      };
+      if (navigator.clipboard?.write && window.ClipboardItem) {
+        try { await navigator.clipboard.write([new ClipboardItem({ [blob.type || "image/png"]: blob })]); }
+        catch { fallbackCopy(); }
+      } else fallbackCopy();
+      if (cut) {
+        const next = image.nextSibling;
+        image.remove();
+        if (selectedImage === image) deselectImage();
+        const selection = window.getSelection(), range = document.createRange();
+        if (next?.parentNode) range.setStartBefore(next); else { range.selectNodeContents(els.contentEditor); range.collapse(false); }
+        range.collapse(true); selection?.removeAllRanges(); selection?.addRange(range); savedEditorRange = range.cloneRange();
+        commitEditor();
+      }
+      showToast(cut ? "图片已剪切" : "图片已复制");
+      return true;
+    } catch {
+      showToast(cut ? "剪切图片失败，请稍后重试" : "复制图片失败，请尝试右键另存后复制");
+      return false;
+    }
+  }
 
   async function pasteText() {
     try {
@@ -2013,6 +2078,7 @@ import { codeSourceFromBlock, editMermaidDiagram, hydrateMermaidDiagrams, mermai
     else if (action === "open-view") setActiveView(value);
     else if (action === "toggle-favorite") toggleFavorite(value);
     else if (action === "duplicate-note") duplicateNote(value);
+    else if (action === "open-move-tree") openMoveTreePicker(value);
     else if (action === "move-category") { const [noteId, categoryId] = value.split("|"); moveNoteToCategory(noteId, categoryId); }
     else if (action === "move-folder") { const [folderId, parentId] = value.split("|"); moveFolder(folderId, parentId); }
     else if (action === "open-file") selectFile(value);
@@ -2023,8 +2089,10 @@ import { codeSourceFromBlock, editMermaidDiagram, hydrateMermaidDiagrams, mermai
     else if (action === "open-link-editor") openLinkInEditor(value, contextPayload?.link?.textContent || "");
     else if (action === "open-link-tab") openLinkNewTab(value);
     else if (action === "copy-link") navigator.clipboard?.writeText(value).then(() => showToast("链接已复制")).catch(() => showToast("复制失败，请手动复制"));
+    else if (action === "image-copy") copyImageToClipboard(contextPayload?.image);
+    else if (action === "image-cut") copyImageToClipboard(contextPayload?.image, true);
     else if (action === "export-note") exportNoteMarkdown(value);
-    else if (action === "trash-note") deleteNoteSafely(value);
+    else if (action === "trash-note") moveToTrash(value);
     else if (action === "restore-note") restoreNote(value);
     else if (action === "permanent-delete") permanentlyDelete(value);
     else if (action === "new-note") createNote(value || undefined);
@@ -2153,8 +2221,7 @@ import { codeSourceFromBlock, editMermaidDiagram, hydrateMermaidDiagrams, mermai
   }
 
   function bindEvents() {
-    // Capture the delete action before the legacy listener so empty notes bypass the trash.
-    els.deleteButton.addEventListener("click", (event) => { event.preventDefault(); event.stopImmediatePropagation(); deleteNoteSafely(); }, true);
+
     els.noteList.addEventListener("click", (event) => {
       const checkbox = event.target.closest?.("[data-trash-select]");
       if (!checkbox) return;
@@ -2207,7 +2274,13 @@ import { codeSourceFromBlock, editMermaidDiagram, hydrateMermaidDiagrams, mermai
     els.titleInput.addEventListener("input", () => { updateActiveNote({ title: els.titleInput.value }, true); if (outlinePane === "primary") updateOutline(); });
     els.categorySelect.addEventListener("change", () => updateActiveNote({ categoryId: els.categorySelect.value }, true));
     els.tagInput.addEventListener("input", () => updateActiveNote({ tags: els.tagInput.value.split(/[,，]/).map((tag) => tag.trim()).filter(Boolean) }, false));
-    els.contentEditor.addEventListener("keydown", applyRichMarkdownShortcut);
+    els.contentEditor.addEventListener("keydown", (event) => {
+      const shortcut = event.ctrlKey || event.metaKey ? event.key.toLowerCase() : "";
+      if (selectedImage && (shortcut === "c" || shortcut === "x")) {
+        event.preventDefault(); void copyImageToClipboard(selectedImage, shortcut === "x"); return;
+      }
+      applyRichMarkdownShortcut(event);
+    });
     els.contentEditor.addEventListener("input", () => { if (replaceCompletedMermaidFences(els.contentEditor)) void hydrateMermaidDiagrams(els.contentEditor); updateActiveNote({ content: getCleanPrimaryHtml() }, true); if (outlinePane === "primary") updateOutline(); });
     els.contentEditor.addEventListener("click", (event) => {
       const link = event.target.closest("a[href]");
@@ -2382,8 +2455,30 @@ import { codeSourceFromBlock, editMermaidDiagram, hydrateMermaidDiagrams, mermai
     });
     els.editorMore.addEventListener("click", (event) => { event.stopPropagation(); const note = getActiveNote(); if (!note) return; const rect = event.currentTarget.getBoundingClientRect(); openContextMenu(rect.right - 226, rect.bottom + 4, noteMenu(note), { noteId: note.id }); });
     els.contextMenu.addEventListener("pointerdown", (event) => event.preventDefault());
-    els.contextMenu.addEventListener("click", (event) => { const item = event.target.closest(".context-item[data-action]"); if (!item || item.classList.contains("disabled")) return; const action = item.dataset.action, value = item.dataset.value || ""; closeContextMenu(); runContextAction(action, value); });
-    document.addEventListener("scroll", closeContextMenu, true);
+    els.contextMenu.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const treeToggle = event.target.closest("[data-move-tree-toggle]");
+      if (treeToggle && moveTreeState) {
+        event.preventDefault(); event.stopPropagation();
+        const id = treeToggle.dataset.moveTreeToggle, scroll = els.contextMenu.querySelector(".move-tree-scroll"), scrollTop = scroll?.scrollTop || 0;
+        moveTreeState.expanded.has(id) ? moveTreeState.expanded.delete(id) : moveTreeState.expanded.add(id);
+        renderMoveTreePicker(); requestAnimationFrame(() => { const next = els.contextMenu.querySelector(".move-tree-scroll"); if (next) next.scrollTop = scrollTop; });
+        return;
+      }
+      const treeTarget = event.target.closest("[data-move-tree-target]");
+      if (treeTarget && moveTreeState) { event.preventDefault(); event.stopPropagation(); chooseMoveTreeTarget(treeTarget.dataset.moveTreeTarget || ""); return; }
+      const item = event.target.closest(".context-item[data-action]");
+      if (item && !item.classList.contains("disabled")) {
+        const action = item.dataset.action, value = item.dataset.value || "";
+        closeContextMenu(); runContextAction(action, value);
+        return;
+      }
+      const submenuItem = event.target.closest(".context-item:not([data-action])");
+      if (submenuItem?.querySelector(":scope > .context-submenu")) {
+        event.stopPropagation(); submenuItem.classList.toggle("submenu-open");
+      }
+    });
+    document.addEventListener("scroll", (event) => { if (els.contextMenu.contains(event.target)) return; closeContextMenu(); }, true);
     document.addEventListener("keydown", async (event) => {
       if (event.key === "Escape" && dialogState) { event.preventDefault(); finishDialog(dialogState.mode === "confirm" ? false : null); return; }
       if (event.key === "Escape") { if (activeLinkUrl) { event.preventDefault(); hideLinkViewer(); return; } closeContextMenu(); els.layoutPopover.hidden = true; els.themePopover.hidden = true; els.themeToggle.setAttribute("aria-expanded", "false"); if (layout.focus) exitFocusMode(); }

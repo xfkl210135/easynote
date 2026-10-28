@@ -17,7 +17,7 @@ const editor = ref<HTMLDivElement | null>(null);
 const imageInput = ref<HTMLInputElement | null>(null);
 const selectedImage = ref<HTMLImageElement | null>(null);
 const selectedTextBlock = ref<HTMLElement | null>(null);
-const editorContextMenu = ref<{ x: number; y: number; block: HTMLElement | null; diagram: HTMLElement | null } | null>(null);
+const editorContextMenu = ref<{ x: number; y: number; block: HTMLElement | null; diagram: HTMLElement | null; image: HTMLImageElement | null } | null>(null);
 const compactPane = ref<"list" | "editor">("editor");
 const folderPanelVisible = ref(localStorage.getItem("easynote-floating-folders-visible") !== "false");
 const noteListVisible = ref(localStorage.getItem("easynote-floating-list-visible") !== "false");
@@ -75,6 +75,7 @@ function scheduleUiRefresh(delay = 240) {
   uiRefreshTimer = window.setTimeout(() => { uiRefreshTimer = 0; touch(); }, delay);
 }
 function now() { return new Date().toISOString(); }
+function clamp(value: number, min: number, max: number) { return Math.min(Math.max(value, min), max); }
 function makeId(prefix: string) { return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`; }
 function windowForWorkspace(): Window { return editor.value?.ownerDocument.defaultView ?? window; }
 function plainText(note: Note): string {
@@ -540,8 +541,47 @@ function selectEditorImage(event: MouseEvent) {
   selectedImage.value = target.tagName === "IMG" ? target as HTMLImageElement : null;
 }
 
+function startImageMove(event: PointerEvent) {
+  const root = editor.value, image = selectedImage.value;
+  if (!root || !image?.isConnected || editMode.value !== "rich") return;
+  event.preventDefault(); event.stopPropagation();
+  const startY = event.clientY, startX = event.clientX, editorRect = root.getBoundingClientRect(), imageRect = image.getBoundingClientRect();
+  const pointerOffsetX = startX - imageRect.left;
+  let moved = false, horizontalMoved = false, destination: { block: Element; after: boolean } | null = null;
+  image.classList.add("floating-image-moving");
+  const update = (moveEvent: PointerEvent) => {
+    if (!moved && Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY) < 5) return;
+    moved = true;
+    if (!horizontalMoved && Math.abs(moveEvent.clientX - startX) > 8) horizontalMoved = true;
+    if (horizontalMoved) {
+      const maxLeft = Math.max(0, editorRect.width - image.getBoundingClientRect().width);
+      const left = clamp(moveEvent.clientX - editorRect.left - pointerOffsetX, 0, maxLeft);
+      image.dataset.align = "free"; image.style.marginLeft = `${(left / Math.max(1, editorRect.width)) * 100}%`; image.style.marginRight = "0";
+    }
+    const blocks = [...root.children].filter((block) => block !== image);
+    const target = blocks.find((block) => moveEvent.clientY < block.getBoundingClientRect().top + block.getBoundingClientRect().height / 2);
+    destination = target ? { block: target, after: false } : blocks.length ? { block: blocks[blocks.length - 1], after: true } : null;
+    root.classList.add("floating-image-dragging");
+  };
+  const finish = () => {
+    window.removeEventListener("pointermove", update); window.removeEventListener("pointerup", finish);
+    image.classList.remove("floating-image-moving"); root.classList.remove("floating-image-dragging");
+    if (!moved || !destination) return;
+    if (destination.after) destination.block.after(image); else destination.block.before(image);
+    if (!horizontalMoved) { image.dataset.align = image.dataset.align || "center"; }
+    syncRichContent();
+  };
+  update(event); window.addEventListener("pointermove", update); window.addEventListener("pointerup", finish, { once: true });
+}
+
 function onEditorPointerDown(event: PointerEvent) {
   const root = editor.value, target = event.target as HTMLElement; if (!root) return;
+  if (target.tagName === "IMG") {
+    selectedImage.value = target as HTMLImageElement;
+    root.focus({ preventScroll: true });
+    startImageMove(event);
+    return;
+  }
   if (target === root) {
     event.preventDefault(); selectedTextBlock.value = null; selectedImage.value = null;
     ensureTrailingParagraph(root);
@@ -556,6 +596,13 @@ function onEditorPointerDown(event: PointerEvent) {
 }
 
 function onEditorKeydown(event: KeyboardEvent) {
+  const shortcut = event.ctrlKey || event.metaKey ? event.key.toLowerCase() : "";
+  const selection = editor.value?.ownerDocument.getSelection();
+  if (selectedImage.value && (shortcut === "c" || shortcut === "x") && (!selection || selection.isCollapsed)) {
+    event.preventDefault();
+    void copyImageToClipboard(selectedImage.value, shortcut === "x");
+    return;
+  }
   if (applyRichMarkdownShortcut(event)) return;
   if (!selectedTextBlock.value || !["Backspace", "Delete"].includes(event.key)) return;
   event.preventDefault(); unwrapTextBlock();
@@ -564,13 +611,53 @@ function onEditorKeydown(event: KeyboardEvent) {
 function openEditorContext(event: MouseEvent) {
   const root = editor.value; if (!root) return;
   event.preventDefault(); event.stopPropagation();
-  const target = event.target as HTMLElement, block = target.closest("pre,blockquote"), diagram = target.closest<HTMLElement>(".mermaid-diagram");
-  editorContextMenu.value = { x: Math.min(event.clientX, windowForWorkspace().innerWidth - 210), y: Math.min(event.clientY, Math.max(8, windowForWorkspace().innerHeight - 520)), block: isFramedBlock(block) ? block : null, diagram };
-  if (isFramedBlock(block)) selectWholeTextBlock(block); else captureSelection();
+  const target = event.target as HTMLElement, block = target.closest("pre,blockquote"), diagram = target.closest<HTMLElement>(".mermaid-diagram"), image = target.closest<HTMLImageElement>("img");
+  editorContextMenu.value = { x: Math.min(event.clientX, windowForWorkspace().innerWidth - 210), y: Math.min(event.clientY, Math.max(8, windowForWorkspace().innerHeight - 520)), block: isFramedBlock(block) ? block : null, diagram, image };
+  if (image) selectedImage.value = image;
+  else if (isFramedBlock(block)) selectWholeTextBlock(block); else captureSelection();
 }
 
-async function editorContextAction(action: "undo" | "redo" | "copy" | "cut" | "paste" | "select-all" | "bold" | "unordered" | "ordered" | "paragraph" | "quote" | "code" | "mermaid" | "render-mermaid" | "edit-mermaid" | "delete-diagram" | "delete-block") {
+async function copyImageToClipboard(image: HTMLImageElement | null, cut = false) {
+  if (!image) return false;
+  try {
+    const doc = image.ownerDocument, view = doc.defaultView ?? window;
+    const response = await view.fetch(image.currentSrc || image.src), blob = await response.blob();
+    const fallbackCopy = () => {
+      const selection = doc.getSelection(), range = doc.createRange();
+      range.selectNode(image); selection?.removeAllRanges(); selection?.addRange(range);
+      const copied = doc.execCommand("copy"); selection?.removeAllRanges();
+      if (!copied) throw new Error("clipboard copy failed");
+    };
+    const ClipboardItemCtor = (view as Window & { ClipboardItem?: typeof ClipboardItem }).ClipboardItem;
+    if (view.navigator.clipboard?.write && ClipboardItemCtor) {
+      try { await view.navigator.clipboard.write([new ClipboardItemCtor({ [blob.type || "image/png"]: blob })]); }
+      catch { fallbackCopy(); }
+    } else fallbackCopy();
+    if (cut) {
+      const root = editor.value, next = image.nextSibling;
+      image.remove();
+      if (selectedImage.value === image) selectedImage.value = null;
+      if (root) {
+        const range = root.ownerDocument.createRange();
+        if (next?.parentNode) range.setStartBefore(next); else { range.selectNodeContents(root); range.collapse(false); }
+        range.collapse(true);
+        const docSelection = root.ownerDocument.getSelection();
+        docSelection?.removeAllRanges(); docSelection?.addRange(range); savedRange = range.cloneRange();
+      }
+      syncRichContent();
+    }
+    runtime.value?.toast(cut ? "图片已剪切" : "图片已复制");
+    return true;
+  } catch {
+    runtime.value?.toast(cut ? "剪切图片失败，请稍后重试" : "复制图片失败，请尝试右键另存后复制");
+    return false;
+  }
+}
+
+async function editorContextAction(action: "undo" | "redo" | "copy" | "cut" | "paste" | "select-all" | "bold" | "unordered" | "ordered" | "paragraph" | "quote" | "code" | "mermaid" | "render-mermaid" | "edit-mermaid" | "delete-diagram" | "delete-block" | "copy-image" | "cut-image") {
   const menu = editorContextMenu.value; editorContextMenu.value = null;
+  if (action === "copy-image") return copyImageToClipboard(menu?.image || selectedImage.value);
+  if (action === "cut-image") return copyImageToClipboard(menu?.image || selectedImage.value, true);
   if (["undo", "redo", "copy", "cut", "bold"].includes(action)) return runCommand(action);
   if (action === "select-all") return runCommand("selectAll");
   if (action === "unordered") return runCommand("insertUnorderedList");
@@ -775,7 +862,7 @@ onBeforeUnmount(() => {
               <button type="button" @click="insertLink">链接</button><button type="button" @click="captureSelection(); imageInput?.click()">图片</button><button type="button" @click="runCommand('removeFormat')">清除格式</button>
               <input ref="imageInput" type="file" accept="image/jpeg,image/png,image/webp,image/gif" multiple hidden @change="onImageFiles(($event.target as HTMLInputElement).files || [])">
             </div>
-            <div v-if="selectedImage && editMode === 'rich'" class="floating-image-controls"><span>图片</span><button v-for="item in ['small','medium','large','full'] as const" :key="item" type="button" @click="imageAction(item)">{{ { small:'小',medium:'中',large:'大',full:'铺满' }[item] }}</button><i></i><button v-for="item in ['left','center','right'] as const" :key="item" type="button" @click="imageAction(item)">{{ { left:'左',center:'中',right:'右' }[item] }}</button><button class="danger" type="button" @click="imageAction('delete')">删除</button></div>
+            <div v-if="selectedImage && editMode === 'rich'" class="floating-image-controls"><span>图片（可直接拖动调整位置）</span><button type="button" @click="copyImageToClipboard(selectedImage)">复制</button><button type="button" @click="copyImageToClipboard(selectedImage, true)">剪切</button><button v-for="item in ['small','medium','large','full'] as const" :key="item" type="button" @click="imageAction(item)">{{ { small:'小',medium:'中',large:'大',full:'铺满' }[item] }}</button><i></i><button v-for="item in ['left','center','right'] as const" :key="item" type="button" @click="imageAction(item)">{{ { left:'左',center:'中',right:'右' }[item] }}</button><button class="danger" type="button" @click="imageAction('delete')">删除</button></div>
             <div v-show="editMode === 'rich'" ref="editor" class="floating-content-editor" :contenteditable="!activeNote.deletedAt" data-placeholder="开始写下你的想法…" spellcheck="true" @input="syncRichContent" @click="selectEditorImage" @pointerdown="onEditorPointerDown" @keydown="onEditorKeydown" @contextmenu="openEditorContext" @paste="onPaste" @dragover.prevent @drop="onDrop"></div>
             <textarea v-if="editMode === 'markdown'" v-model="markdownText" class="floating-markdown-editor" :disabled="Boolean(activeNote.deletedAt)" placeholder="# 开始写作…&#10;&#10;```mermaid&#10;flowchart TD&#10;A[开始] --> B[结束]&#10;```" @input="onMarkdownInput"></textarea>
           </div>
@@ -787,6 +874,7 @@ onBeforeUnmount(() => {
       <button type="button" @click="contextAction('open')">打开笔记</button><button type="button" @click="contextAction('favorite')">收藏或取消收藏</button><button type="button" @click="contextAction('duplicate')">复制笔记</button><hr><button class="danger" type="button" @click="contextAction('trash')">移入回收站</button>
     </div>
     <div v-if="editorContextMenu" class="floating-context-menu floating-editor-context-menu" :style="{ left: `${editorContextMenu.x}px`, top: `${editorContextMenu.y}px` }" @pointerdown.prevent.stop @click.stop>
+      <template v-if="editorContextMenu.image"><button type="button" @click="editorContextAction('copy-image')">复制图片 <span>Ctrl C</span></button><button type="button" @click="editorContextAction('cut-image')">剪切图片 <span>Ctrl X</span></button><hr></template>
       <template v-if="editorContextMenu.diagram"><button type="button" @click="editorContextAction('edit-mermaid')">编辑 Mermaid 源码</button><button class="danger" type="button" @click="editorContextAction('delete-diagram')">删除 Mermaid 图表</button><hr></template>
       <template v-if="editorContextMenu.block"><button v-if="editorContextMenu.block.dataset.codeLanguage === 'mermaid'" type="button" @click="editorContextAction('render-mermaid')">渲染 Mermaid 图表</button><button type="button" @click="editorContextAction('paragraph')">去掉框，保留文字</button><button class="danger" type="button" @click="editorContextAction('delete-block')">删除整个块</button><hr></template>
       <button type="button" @click="editorContextAction('copy')">复制 <span>Ctrl C</span></button><button type="button" @click="editorContextAction('cut')">剪切 <span>Ctrl X</span></button><button type="button" @click="editorContextAction('paste')">粘贴纯文本 <span>Ctrl V</span></button><button type="button" @click="editorContextAction('select-all')">全选 <span>Ctrl A</span></button><hr><button type="button" @click="editorContextAction('bold')">加粗</button><button type="button" @click="editorContextAction('unordered')">无序列表</button><button type="button" @click="editorContextAction('ordered')">有序列表</button><button type="button" @click="editorContextAction('quote')">设为引用框</button><button type="button" @click="editorContextAction('code')">设为代码框</button><button type="button" @click="editorContextAction('mermaid')">插入 Mermaid 流程图</button><hr><button type="button" @click="editorContextAction('undo')">撤销 <span>Ctrl Z</span></button><button type="button" @click="editorContextAction('redo')">重做 <span>Ctrl Y</span></button>
@@ -819,7 +907,7 @@ onBeforeUnmount(() => {
 .floating-editor-panel{min-width:0;min-height:0;display:flex;flex-direction:column;background:var(--fn-surface)}.floating-editor-topline{height:48px;flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;padding:0 13px;border-bottom:1px solid var(--fn-border);color:var(--fn-muted);font-size:10px}.floating-editor-topline>div{display:flex;gap:5px}.floating-editor-topline button.danger,.floating-image-controls button.danger,.floating-context-menu button.danger{color:#d84c5a}.floating-list-toggle{display:inline-flex;align-items:center}.floating-editor-leading-actions{display:flex;align-items:center;gap:5px}.floating-editor-new-note{border-color:#4f7df3!important;color:#fff!important;background:#4f7df3!important;font-weight:700}.floating-editor-scroll{min-height:0;flex:1;overflow:auto;padding:25px clamp(22px,5vw,70px) 80px}.floating-title-input{width:100%;border:0;outline:0;color:var(--fn-text);background:transparent;font-size:clamp(25px,3vw,36px);font-weight:750}.floating-meta-row{position:relative;display:grid;grid-template-columns:minmax(230px,1.2fr) minmax(150px,.8fr) minmax(180px,1fr) auto;gap:10px;margin:15px 0}.floating-meta-row label{min-width:0;display:flex;align-items:center;gap:7px}.floating-meta-row label span{color:var(--fn-muted);font-size:10px;white-space:nowrap}.floating-meta-row input,.floating-meta-row select{min-width:0;height:33px;flex:1;padding:0 9px;border:1px solid var(--fn-border);border-radius:8px;color:var(--fn-text);background:var(--fn-soft)}.floating-note-picker{position:relative;min-width:0;display:flex;align-items:center;gap:7px}.floating-note-picker>span{color:var(--fn-muted);font-size:10px;white-space:nowrap}.floating-note-picker-trigger{min-width:0;height:40px;flex:1;display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-rows:1fr 1fr;column-gap:8px;padding:4px 8px!important;border:1px solid var(--fn-border)!important;border-radius:8px!important;color:var(--fn-text)!important;background:var(--fn-soft)!important;text-align:left}.floating-note-picker-trigger>span,.floating-note-picker-trigger>strong{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.floating-note-picker-trigger>span{color:var(--fn-muted);font-size:9px}.floating-note-picker-trigger>strong{font-size:11px}.floating-note-picker-trigger>b{grid-column:2;grid-row:1/3;align-self:center;color:var(--fn-muted);font-size:15px}.floating-note-picker-popover{position:absolute;z-index:90;top:calc(100% + 7px);left:0;width:min(420px,80vw);max-height:min(520px,65vh);display:flex;flex-direction:column;border:1px solid var(--fn-border);border-radius:12px;background:var(--fn-surface);box-shadow:0 18px 48px rgba(15,23,42,.22);overflow:hidden}.floating-note-picker-heading{height:50px;flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;padding:0 13px;border-bottom:1px solid var(--fn-border)}.floating-note-picker-heading span{color:var(--fn-muted);font-size:9px}.floating-note-tree{min-height:0;overflow:auto;padding:7px}.floating-note-tree button{width:100%;border:0;color:var(--fn-text);background:transparent;cursor:pointer;text-align:left}.floating-note-tree-folder{height:38px;display:flex;align-items:center;gap:8px;border-radius:8px!important}.floating-note-tree-folder:hover{background:var(--fn-soft)}.floating-note-tree-folder>b{width:12px;color:var(--fn-muted);font-size:17px;font-weight:400}.floating-note-tree-folder>i{width:18px;height:13px;flex:0 0 auto;border:1.5px solid;border-radius:3px}.floating-note-tree-folder>strong{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.floating-note-tree-folder>span{color:var(--fn-muted);font-size:10px}.floating-note-tree-note{height:36px;display:flex;align-items:center;gap:8px;border-radius:7px!important;color:var(--fn-muted)!important}.floating-note-tree-note:hover,.floating-note-tree-note.active{color:#386fd8!important;background:color-mix(in srgb,#4f7df3 10%,var(--fn-soft))}.floating-note-tree-note>i{font-style:normal}.floating-note-tree-note>span{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.floating-note-tree-note>time{display:none;color:var(--fn-muted);font-size:8px}
 .floating-recent-picker,.floating-folder-picker{position:relative;min-width:0;display:flex;align-items:center;gap:7px}.floating-recent-trigger,.floating-folder-picker-trigger{min-width:0;flex:1;height:40px;display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-rows:1fr 1fr;padding:4px 8px;border:1px solid var(--fn-border);border-radius:8px;color:var(--fn-text);background:var(--fn-soft);text-align:left;cursor:pointer}.floating-recent-trigger span,.floating-folder-picker>span{color:var(--fn-muted);font-size:9px}.floating-recent-trigger strong,.floating-folder-picker-trigger strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px}.floating-recent-trigger b,.floating-folder-picker-trigger b{grid-column:2;grid-row:1/3;align-self:center;color:var(--fn-muted);font-size:15px}.floating-recent-popover,.floating-folder-picker-popover{position:absolute;z-index:95;top:calc(100% + 7px);left:0;width:min(360px,76vw);max-height:min(420px,60vh);display:flex;flex-direction:column;padding:7px;border:1px solid var(--fn-border);border-radius:12px;background:var(--fn-surface);box-shadow:0 18px 48px rgba(15,23,42,.22);overflow:auto}.floating-recent-heading{height:34px;display:flex;align-items:center;justify-content:space-between;padding:0 6px;color:var(--fn-text)}.floating-recent-heading span{color:var(--fn-muted);font-size:9px}.floating-recent-popover button,.floating-folder-picker-popover button{min-height:34px;display:flex;align-items:center;gap:7px;border:0;border-radius:7px;padding:0 7px;color:var(--fn-text);background:transparent;text-align:left;cursor:pointer}.floating-recent-popover button:hover,.floating-recent-popover button.active,.floating-folder-picker-popover button:hover,.floating-folder-picker-popover button.active{color:var(--fn-primary);background:color-mix(in srgb,var(--fn-primary) 10%,var(--fn-soft))}.floating-recent-popover button span,.floating-folder-picker-popover button span{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.floating-recent-popover time{color:var(--fn-muted);font-size:9px}.floating-folder-picker-popover button i{width:8px;height:8px;flex:0 0 auto;border-radius:3px}.floating-recent-popover p{padding:14px;color:var(--fn-muted);font-size:10px;text-align:center}.floating-tags-field{display:flex!important;flex-direction:column;align-items:stretch!important;gap:3px!important}.floating-tags-field small{color:var(--fn-muted);font-size:8px;font-weight:400}.floating-folder-location>i{flex:0 0 auto;color:var(--fn-muted);font-size:11px;font-style:normal}.floating-folder-location select:disabled{cursor:not-allowed;opacity:.72}
 .floating-format-toolbar{position:sticky;z-index:4;top:-25px;display:flex;align-items:center;gap:3px;margin:8px 0 14px;padding:6px;border:1px solid var(--fn-border);border-radius:10px;background:var(--fn-surface);overflow-x:auto}.floating-format-toolbar button,.floating-image-controls button{height:30px;flex:0 0 auto;padding:0 8px;border:0;border-radius:6px;color:var(--fn-muted);background:transparent;cursor:pointer}.floating-format-toolbar button:hover,.floating-image-controls button:hover{color:#386fd8;background:color-mix(in srgb,#4f7df3 10%,var(--fn-soft))}.floating-format-toolbar i,.floating-image-controls i{width:1px;height:20px;flex:0 0 auto;background:var(--fn-border)}
-.floating-content-editor{min-height:calc(100vh - 260px);outline:0;color:var(--fn-text);font-size:15px;line-height:1.78}.floating-content-editor:empty::before{color:var(--fn-muted);content:attr(data-placeholder)}.floating-content-editor h1,.floating-content-editor h2,.floating-content-editor h3{line-height:1.35}.floating-content-editor blockquote{margin:12px 0;padding:8px 34px 8px 14px;border-left:3px solid #4f7df3;color:var(--fn-muted);background:var(--fn-soft)}.floating-content-editor pre{padding:13px 36px 13px 13px;border-radius:9px;background:#121827;color:#e8edf7;white-space:pre-wrap}.floating-content-editor blockquote,.floating-content-editor pre{position:relative;min-height:42px}.floating-content-editor blockquote::after,.floating-content-editor pre::after{content:"⋮";position:absolute;top:0;right:0;bottom:0;width:25px;display:grid;place-items:center;border-left:1px solid rgba(148,163,184,.22);color:#94a3b8;font:18px/1 sans-serif;cursor:pointer;opacity:.62}.floating-content-editor blockquote:hover::after,.floating-content-editor pre:hover::after{opacity:1;background:rgba(79,125,243,.08)}.floating-content-editor blockquote:has(::selection),.floating-content-editor pre:has(::selection){outline:2px solid color-mix(in srgb,#4f7df3 55%,transparent)}.floating-content-editor>p:last-child:empty,.floating-content-editor>p:last-child:has(>br:only-child){min-height:30px;margin:8px 0;cursor:text}.floating-content-editor a{color:#386fd8}.floating-content-editor img{max-width:100%;height:auto;display:block;margin:14px auto;border-radius:8px;cursor:pointer}.floating-content-editor img[data-size="small"]{width:30%}.floating-content-editor img[data-size="medium"]{width:55%}.floating-content-editor img[data-size="large"]{width:78%}.floating-content-editor img[data-size="full"]{width:100%}.floating-content-editor img:hover{outline:2px solid color-mix(in srgb,#4f7df3 55%,transparent)}.floating-image-controls{display:flex;align-items:center;gap:3px;margin:-6px 0 10px;padding:5px 7px;border:1px solid color-mix(in srgb,#4f7df3 34%,var(--fn-border));border-radius:8px;background:var(--fn-soft)}.floating-image-controls span{margin-right:5px;color:#386fd8;font-size:10px;font-weight:700}.floating-markdown-editor{width:100%;min-height:calc(100vh - 250px);resize:none;padding:14px;border:1px solid var(--fn-border);border-radius:10px;outline:0;color:var(--fn-text);background:var(--fn-soft);font:14px/1.7 Consolas,"Microsoft YaHei",monospace}
+.floating-content-editor{min-height:calc(100vh - 260px);outline:0;color:var(--fn-text);font-size:15px;line-height:1.78}.floating-content-editor:empty::before{color:var(--fn-muted);content:attr(data-placeholder)}.floating-content-editor h1,.floating-content-editor h2,.floating-content-editor h3{line-height:1.35}.floating-content-editor blockquote{margin:12px 0;padding:8px 34px 8px 14px;border-left:3px solid #4f7df3;color:var(--fn-muted);background:var(--fn-soft)}.floating-content-editor pre{padding:13px 36px 13px 13px;border-radius:9px;background:#121827;color:#e8edf7;white-space:pre-wrap}.floating-content-editor blockquote,.floating-content-editor pre{position:relative;min-height:42px}.floating-content-editor blockquote::after,.floating-content-editor pre::after{content:"⋮";position:absolute;top:0;right:0;bottom:0;width:25px;display:grid;place-items:center;border-left:1px solid rgba(148,163,184,.22);color:#94a3b8;font:18px/1 sans-serif;cursor:pointer;opacity:.62}.floating-content-editor blockquote:hover::after,.floating-content-editor pre:hover::after{opacity:1;background:rgba(79,125,243,.08)}.floating-content-editor blockquote:has(::selection),.floating-content-editor pre:has(::selection){outline:2px solid color-mix(in srgb,#4f7df3 55%,transparent)}.floating-content-editor>p:last-child:empty,.floating-content-editor>p:last-child:has(>br:only-child){min-height:30px;margin:8px 0;cursor:text}.floating-content-editor a{color:#386fd8}.floating-content-editor img{max-width:100%;height:auto;display:block;margin:14px auto;border-radius:8px;cursor:grab;user-select:none}.floating-content-editor img.floating-image-moving{cursor:grabbing;opacity:.72}.floating-content-editor.floating-image-dragging{cursor:grabbing}.floating-content-editor img[data-size="small"]{width:30%}.floating-content-editor img[data-size="medium"]{width:55%}.floating-content-editor img[data-size="large"]{width:78%}.floating-content-editor img[data-size="full"]{width:100%}.floating-content-editor img:hover{outline:2px solid color-mix(in srgb,#4f7df3 55%,transparent)}.floating-image-controls{display:flex;align-items:center;gap:3px;margin:-6px 0 10px;padding:5px 7px;border:1px solid color-mix(in srgb,#4f7df3 34%,var(--fn-border));border-radius:8px;background:var(--fn-soft)}.floating-image-controls span{margin-right:5px;color:#386fd8;font-size:10px;font-weight:700}.floating-markdown-editor{width:100%;min-height:calc(100vh - 250px);resize:none;padding:14px;border:1px solid var(--fn-border);border-radius:10px;outline:0;color:var(--fn-text);background:var(--fn-soft);font:14px/1.7 Consolas,"Microsoft YaHei",monospace}
 .floating-content-editor blockquote{margin-right:28px;padding-right:14px}.floating-content-editor pre{margin-right:28px;padding-right:13px}.floating-content-editor blockquote::after,.floating-content-editor pre::after{right:-28px;border:1px solid var(--fn-border);border-radius:0 7px 7px 0;background:var(--fn-soft)}.floating-content-editor>p:last-child:empty,.floating-content-editor>p:last-child:has(>br:only-child){min-height:34px}
 .floating-context-menu{position:fixed;z-index:999;width:180px;display:grid;padding:6px;border:1px solid var(--fn-border);border-radius:10px;background:var(--fn-surface);box-shadow:0 16px 42px rgba(15,23,42,.24)}.floating-context-menu button{height:34px;border:0;border-radius:6px;color:var(--fn-text);background:transparent;text-align:left}.floating-context-menu button:hover{background:var(--fn-soft)}.floating-context-menu hr{width:100%;border:0;border-top:1px solid var(--fn-border)}
 .floating-editor-context-menu{width:205px;max-height:calc(100vh - 16px);overflow-y:auto}.floating-editor-context-menu button{display:flex;align-items:center;justify-content:space-between;gap:12px}.floating-editor-context-menu button span{color:var(--fn-muted);font-size:9px}
